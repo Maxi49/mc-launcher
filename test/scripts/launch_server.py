@@ -149,9 +149,13 @@ def main():
     server_jar = server_dir / "server.jar"
     version_json = server_dir / f"{args.version_id}.json"
 
-    if not server_jar.exists():
+    fabric_jar = server_dir / "fabric-server-launch.jar"
+    if fabric_jar.exists():
+        print("Fabric server detected — using fabric-server-launch.jar")
+        server_jar = fabric_jar
+    elif not server_jar.exists():
         print(f"missing server jar: {server_jar}", file=sys.stderr)
-        print("run download_server_windows.py first", file=sys.stderr)
+        print("run download_server.py (or install_fabric.py --server) first", file=sys.stderr)
         return 1
 
     java_exe = args.java

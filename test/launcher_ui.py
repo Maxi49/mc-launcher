@@ -195,6 +195,7 @@ class LauncherWindow(QMainWindow):
         self.launcher_path = self.script_dir / "scripts" / "launch_client.py"
         self.server_downloader_path = self.script_dir / "scripts" / "download_server.py"
         self.server_launcher_path = self.script_dir / "scripts" / "launch_server.py"
+        self.fabric_installer_path = self.script_dir / "scripts" / "install_fabric.py"
 
         self.all_manifest_versions = []
         self.manifest_fetcher = None
@@ -289,6 +290,13 @@ class LauncherWindow(QMainWindow):
         self.download_button = QPushButton("Download")
         self.download_button.clicked.connect(self.on_download_clicked)
         dl_row.addWidget(self.download_button)
+        self.install_fabric_button = QPushButton("Install Fabric")
+        self.install_fabric_button.setToolTip(
+            "Install the Fabric mod loader for the selected version.\n"
+            "Download the vanilla version first, then click this."
+        )
+        self.install_fabric_button.clicked.connect(self.on_install_fabric_clicked)
+        dl_row.addWidget(self.install_fabric_button)
         layout.addLayout(dl_row)
 
         # Play button
@@ -363,6 +371,63 @@ class LauncherWindow(QMainWindow):
         server_row.addWidget(self.download_server_button)
         server_row.addWidget(self.launch_server_button)
         layout.addLayout(server_row)
+
+        # ── Game Properties (collapsible) ──────────────────────
+        self.game_props_toggle = QCheckBox("Game Properties")
+        self.game_props_toggle.toggled.connect(self._toggle_game_props_panel)
+        layout.addWidget(self.game_props_toggle)
+
+        self.game_props_panel = QWidget()
+        gp_layout = QVBoxLayout(self.game_props_panel)
+        gp_layout.setContentsMargins(0, 0, 0, 0)
+        gp_layout.setSpacing(8)
+
+        gp_group = QGroupBox("Server world settings")
+        gp_form = QFormLayout(gp_group)
+        gp_form.setLabelAlignment(Qt.AlignLeft)
+
+        self.srv_difficulty_combo = QComboBox()
+        self.srv_difficulty_combo.addItems(["peaceful", "easy", "normal", "hard"])
+        self.srv_difficulty_combo.setCurrentText("easy")
+        gp_form.addRow("Difficulty", self.srv_difficulty_combo)
+
+        self.srv_gamemode_combo = QComboBox()
+        self.srv_gamemode_combo.addItems(["survival", "creative", "adventure", "spectator"])
+        gp_form.addRow("Default gamemode", self.srv_gamemode_combo)
+
+        self.srv_max_players_spin = QSpinBox()
+        self.srv_max_players_spin.setRange(1, 1000)
+        self.srv_max_players_spin.setValue(20)
+        gp_form.addRow("Max players", self.srv_max_players_spin)
+
+        self.srv_pvp_check = QCheckBox("PvP")
+        self.srv_pvp_check.setChecked(True)
+        gp_form.addRow(self.srv_pvp_check)
+
+        self.srv_spawn_monsters_check = QCheckBox("Spawn monsters")
+        self.srv_spawn_monsters_check.setChecked(True)
+        gp_form.addRow(self.srv_spawn_monsters_check)
+
+        self.srv_cmd_blocks_check = QCheckBox("Enable command blocks")
+        gp_form.addRow(self.srv_cmd_blocks_check)
+
+        self.srv_cheats_check = QCheckBox("Allow cheats (op yourself)")
+        self.srv_cheats_check.setChecked(True)
+        gp_form.addRow(self.srv_cheats_check)
+
+        apply_props_btn = QPushButton("Apply to server now")
+        apply_props_btn.clicked.connect(self._apply_game_props_now)
+        gp_form.addRow(apply_props_btn)
+
+        gp_layout.addWidget(gp_group)
+
+        gp_hint = QLabel("Gamerules (keepInventory, etc.) can be set in-game with /gamerule.")
+        gp_hint.setWordWrap(True)
+        gp_hint.setStyleSheet("color: #7f8792; font-size: 11px;")
+        gp_layout.addWidget(gp_hint)
+
+        self.game_props_panel.setVisible(False)
+        layout.addWidget(self.game_props_panel)
 
         # Separator between main section and logs/dev
         separator = QFrame()
@@ -485,10 +550,12 @@ class LauncherWindow(QMainWindow):
         self.server_gui_check = QCheckBox("Enable server GUI")
         self.server_restart_check = QCheckBox("Restart if running")
         self.server_offline_check = QCheckBox("Offline mode (online-mode=false)")
+        self.server_fabric_check = QCheckBox("Fabric server (downloads Fabric launcher)")
         srv_form.addRow(self.server_accept_eula_check)
         srv_form.addRow(self.server_gui_check)
         srv_form.addRow(self.server_restart_check)
         srv_form.addRow(self.server_offline_check)
+        srv_form.addRow(self.server_fabric_check)
         firewall_btn = QPushButton("Open firewall port 25565")
         firewall_btn.clicked.connect(self._open_firewall_port)
         srv_form.addRow(firewall_btn)
@@ -668,6 +735,27 @@ class LauncherWindow(QMainWindow):
             anim.start()
             self._mods_anim = anim
 
+    def _toggle_game_props_panel(self, visible):
+        if visible:
+            self.game_props_panel.setMaximumHeight(0)
+            self.game_props_panel.setVisible(True)
+            anim = QPropertyAnimation(self.game_props_panel, b"maximumHeight")
+            anim.setDuration(250)
+            anim.setStartValue(0)
+            anim.setEndValue(2000)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.start()
+            self._game_props_anim = anim
+        else:
+            anim = QPropertyAnimation(self.game_props_panel, b"maximumHeight")
+            anim.setDuration(250)
+            anim.setStartValue(self.game_props_panel.height())
+            anim.setEndValue(0)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.finished.connect(lambda: self.game_props_panel.setVisible(False))
+            anim.start()
+            self._game_props_anim = anim
+
     def _refresh_mods(self):
         base_dir = self.base_dir_edit.text().strip()
         if not base_dir:
@@ -743,6 +831,83 @@ class LauncherWindow(QMainWindow):
                 "Run this command in a terminal:\n\n"
                 "sudo ufw allow 25565/tcp"
             )
+
+    # ── Game properties ───────────────────────────────────────
+
+    def _write_server_properties(self, server_dir):
+        """Write/update server.properties with current game properties settings."""
+        server_dir = Path(server_dir)
+        server_dir.mkdir(parents=True, exist_ok=True)
+        props_path = server_dir / "server.properties"
+        updates = {
+            "difficulty": self.srv_difficulty_combo.currentText(),
+            "gamemode": self.srv_gamemode_combo.currentText(),
+            "max-players": str(self.srv_max_players_spin.value()),
+            "pvp": "true" if self.srv_pvp_check.isChecked() else "false",
+            "spawn-monsters": "true" if self.srv_spawn_monsters_check.isChecked() else "false",
+            "enable-command-block": "true" if self.srv_cmd_blocks_check.isChecked() else "false",
+        }
+        if props_path.exists():
+            lines = props_path.read_text(encoding="utf-8").splitlines()
+            new_lines = []
+            written = set()
+            for line in lines:
+                if "=" in line and not line.startswith("#"):
+                    key = line.split("=", 1)[0].strip()
+                    if key in updates:
+                        new_lines.append(f"{key}={updates[key]}")
+                        written.add(key)
+                        continue
+                new_lines.append(line)
+            for key, val in updates.items():
+                if key not in written:
+                    new_lines.append(f"{key}={val}")
+            props_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        else:
+            lines = [f"{k}={v}" for k, v in updates.items()]
+            props_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        # ops.json — add/remove player as op based on "Allow cheats" toggle
+        self._update_ops_json(server_dir)
+
+    def _update_ops_json(self, server_dir):
+        import uuid as _uuid
+        import hashlib as _hashlib
+        ops_path = Path(server_dir) / "ops.json"
+        username = self.username_edit.text().strip() or "Player"
+        # Matches Minecraft's UUID.nameUUIDFromBytes("OfflinePlayer:<name>")
+        _d = bytearray(_hashlib.md5(f"OfflinePlayer:{username}".encode("utf-8")).digest())
+        _d[6] = (_d[6] & 0x0F) | 0x30
+        _d[8] = (_d[8] & 0x3F) | 0x80
+        offline_uuid = str(_uuid.UUID(bytes=bytes(_d)))
+
+        try:
+            ops = json.loads(ops_path.read_text(encoding="utf-8")) if ops_path.exists() else []
+        except (OSError, json.JSONDecodeError):
+            ops = []
+
+        # Remove any existing entry for this username/uuid
+        ops = [e for e in ops if e.get("name") != username and e.get("uuid") != offline_uuid]
+
+        if self.srv_cheats_check.isChecked():
+            ops.append({"uuid": offline_uuid, "name": username, "level": 4, "bypassesPlayerLimit": False})
+
+        ops_path.write_text(json.dumps(ops, indent=2, ensure_ascii=True), encoding="utf-8")
+
+    def _apply_game_props_now(self):
+        base_dir = self._ensure_base_dir()
+        if not base_dir:
+            return
+        servers_dir = self._resolve_servers_dir(base_dir)
+        version_id = self.installed_combo.currentText()
+        if not version_id or version_id == "No versions installed":
+            version_id = self.version_combo.currentText()
+        if not version_id or version_id == "Loading...":
+            QMessageBox.warning(self, "No version", "Select a version first.")
+            return
+        server_dir = Path(servers_dir) / version_id
+        self._write_server_properties(server_dir)
+        self.status_label.setText(f"server.properties updated for {version_id}.")
 
     # ── Auto-update ───────────────────────────────────────────
 
@@ -930,6 +1095,18 @@ class LauncherWindow(QMainWindow):
         self.server_gui_check.setChecked(settings.get("server_gui", False))
         self.server_restart_check.setChecked(settings.get("server_restart", True))
         self.server_offline_check.setChecked(settings.get("server_offline_mode", True))
+        self.server_fabric_check.setChecked(settings.get("server_fabric", False))
+        idx = self.srv_difficulty_combo.findText(settings.get("srv_difficulty", "easy"))
+        if idx >= 0:
+            self.srv_difficulty_combo.setCurrentIndex(idx)
+        idx = self.srv_gamemode_combo.findText(settings.get("srv_gamemode", "survival"))
+        if idx >= 0:
+            self.srv_gamemode_combo.setCurrentIndex(idx)
+        self.srv_max_players_spin.setValue(settings.get("srv_max_players", 20))
+        self.srv_pvp_check.setChecked(settings.get("srv_pvp", True))
+        self.srv_spawn_monsters_check.setChecked(settings.get("srv_spawn_monsters", True))
+        self.srv_cmd_blocks_check.setChecked(settings.get("srv_cmd_blocks", False))
+        self.srv_cheats_check.setChecked(settings.get("srv_cheats", True))
         if not self.servers_dir_edit.text().strip():
             self.servers_dir_edit.setText(
                 str(Path(self.base_dir_edit.text().strip() or default_base_dir()) / "servers")
@@ -961,6 +1138,14 @@ class LauncherWindow(QMainWindow):
             "server_gui": self.server_gui_check.isChecked(),
             "server_restart": self.server_restart_check.isChecked(),
             "server_offline_mode": self.server_offline_check.isChecked(),
+            "server_fabric": self.server_fabric_check.isChecked(),
+            "srv_difficulty": self.srv_difficulty_combo.currentText(),
+            "srv_gamemode": self.srv_gamemode_combo.currentText(),
+            "srv_max_players": self.srv_max_players_spin.value(),
+            "srv_pvp": self.srv_pvp_check.isChecked(),
+            "srv_spawn_monsters": self.srv_spawn_monsters_check.isChecked(),
+            "srv_cmd_blocks": self.srv_cmd_blocks_check.isChecked(),
+            "srv_cheats": self.srv_cheats_check.isChecked(),
             "selected_version": self.installed_combo.currentText(),
         }
         save_settings(settings)
@@ -1138,6 +1323,19 @@ class LauncherWindow(QMainWindow):
 
         self.start_main_process(args, f"Launching {version_id}...")
 
+    def on_install_fabric_clicked(self):
+        base_dir = self._ensure_base_dir()
+        if not base_dir:
+            return
+        version_id = self.version_combo.currentText()
+        if not version_id or version_id == "Loading...":
+            QMessageBox.warning(self, "No version", "Select a version to install Fabric for.")
+            return
+        extra = [version_id, "--base-dir", base_dir]
+        args = self._script_args(self.fabric_installer_path, extra)
+        self.log_toggle.setChecked(True)
+        self.start_main_process(args, f"Installing Fabric for {version_id}...")
+
     def on_download_server_clicked(self):
         if not self._ensure_scripts():
             return
@@ -1151,15 +1349,19 @@ class LauncherWindow(QMainWindow):
             QMessageBox.warning(self, "No version", "Wait for versions to load or select one.")
             return
 
-        extra = [version_id, "--servers-dir", servers_dir]
-        if self.verify_check.isChecked():
-            extra.append("--verify")
-        if self.include_mappings_check.isChecked():
-            extra.append("--include-mappings")
-        args = self._script_args(self.server_downloader_path, extra)
-
         self.log_toggle.setChecked(True)
-        self.start_main_process(args, f"Downloading server {version_id}...")
+        if self.server_fabric_check.isChecked():
+            extra = [version_id, "--servers-dir", servers_dir, "--server"]
+            args = self._script_args(self.fabric_installer_path, extra)
+            self.start_main_process(args, f"Downloading Fabric server {version_id}...")
+        else:
+            extra = [version_id, "--servers-dir", servers_dir]
+            if self.verify_check.isChecked():
+                extra.append("--verify")
+            if self.include_mappings_check.isChecked():
+                extra.append("--include-mappings")
+            args = self._script_args(self.server_downloader_path, extra)
+            self.start_main_process(args, f"Downloading server {version_id}...")
 
     def on_launch_server_clicked(self):
         if not self._ensure_scripts():
@@ -1174,6 +1376,9 @@ class LauncherWindow(QMainWindow):
         if not version_id or version_id == "Loading...":
             QMessageBox.warning(self, "No version", "Select a version.")
             return
+
+        # Apply game properties to server.properties before launch
+        self._write_server_properties(Path(servers_dir) / version_id)
 
         extra = [version_id, "--servers-dir", servers_dir, "--minecraft-dir", base_dir]
         java_path = self.java_edit.text().strip()
@@ -1234,6 +1439,7 @@ class LauncherWindow(QMainWindow):
     def _set_main_busy(self, busy):
         for widget in (
             self.download_button,
+            self.install_fabric_button,
             self.launch_button,
             self.download_server_button,
         ):

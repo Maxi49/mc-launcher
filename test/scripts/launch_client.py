@@ -123,6 +123,39 @@ def jvm_args_contain(items, needle):
     return False
 
 
+def load_merged_version(versions_dir, version_id):
+    """Load a version JSON, recursively merging with parent if inheritsFrom is set.
+
+    Fabric version JSONs declare inheritsFrom pointing at the vanilla version.
+    The merge rules follow the official launcher spec:
+    - libraries: parent list + child list
+    - arguments.game/jvm: parent list + child list
+    - all other keys: child value takes precedence; parent value used as fallback
+    """
+    json_path = Path(versions_dir) / version_id / f"{version_id}.json"
+    data = read_json(json_path)
+    parent_id = data.get("inheritsFrom")
+    if not parent_id:
+        return data
+    parent = load_merged_version(versions_dir, parent_id)
+    merged = dict(parent)
+    for key, val in data.items():
+        if key == "inheritsFrom":
+            continue
+        if key == "libraries":
+            merged["libraries"] = parent.get("libraries", []) + val
+        elif key == "arguments":
+            merged_args = {}
+            for akey in ("game", "jvm"):
+                merged_args[akey] = (
+                    parent.get("arguments", {}).get(akey, []) + val.get(akey, [])
+                )
+            merged["arguments"] = merged_args
+        else:
+            merged[key] = val
+    return merged
+
+
 def extract_native_jar(jar_path, dest_dir, excludes):
     with zipfile.ZipFile(jar_path, "r") as zf:
         for info in zf.infolist():
@@ -202,7 +235,7 @@ def main():
     if not version_json_path.exists():
         print(f"missing version json: {version_json_path}", file=sys.stderr)
         return 1
-    version_data = read_json(version_json_path)
+    version_data = load_merged_version(base_dir / "versions", version_id)
 
     os_name = current_os_name()
     os_arch, arch_bits = detect_arch()
