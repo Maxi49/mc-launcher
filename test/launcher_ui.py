@@ -1,3 +1,20 @@
+# ── Frozen script dispatcher ───────────────────────────────────
+# When the app runs as a PyInstaller binary, it also acts as the
+# Python interpreter for the CLI scripts (called with --script <name>).
+import sys as _sys
+if getattr(_sys, 'frozen', False) and len(_sys.argv) > 1 and _sys.argv[1] == '--script':
+    def _dispatch():
+        import runpy
+        from pathlib import Path as _Path
+        script_name = _sys.argv[2]
+        _sys.argv = [_sys.argv[0]] + _sys.argv[3:]
+        base = _Path(getattr(_sys, '_MEIPASS', _Path(__file__).resolve().parent))
+        _sys.path.insert(0, str(base))
+        runpy.run_path(str(base / 'scripts' / f'{script_name}.py'), run_name='__main__')
+    _dispatch()
+    _sys.exit(0)
+# ──────────────────────────────────────────────────────────────
+
 import json
 import os
 import subprocess
@@ -38,6 +55,12 @@ except ImportError:
 
 from mc_common import format_cmd, check_username_taken, default_minecraft_dir
 
+try:
+    from version import __version__
+except ImportError:
+    __version__ = "0.0.0"
+
+GITHUB_REPO = "Maxi49/mc-launcher"
 SETTINGS_FILE = Path(__file__).with_name("launcher_settings.json")
 MANIFEST_CACHE = Path(__file__).with_name("version_manifest_cache.json")
 MANIFEST_URL = "https://launchermeta.mojang.com/mc/game/version_manifest.json"
@@ -125,6 +148,42 @@ class UsernameChecker(QThread):
         self.finished.emit(result)
 
 
+class UpdateChecker(QThread):
+    """Check GitHub releases for a newer version in the background."""
+
+    update_available = Signal(str, str)  # tag, download_url
+
+    def run(self):
+        try:
+            from urllib.request import urlopen
+            import json as _json
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            with urlopen(url, timeout=10) as resp:
+                data = _json.loads(resp.read())
+            tag = data.get("tag_name", "")
+            latest = tag.lstrip("v")
+            if self._newer(latest, __version__):
+                asset_name = (
+                    "launcher-windows.exe" if sys.platform == "win32"
+                    else "launcher-macos"
+                )
+                for asset in data.get("assets", []):
+                    if asset["name"] == asset_name:
+                        self.update_available.emit(tag, asset["browser_download_url"])
+                        return
+        except Exception:
+            pass
+
+    @staticmethod
+    def _newer(latest, current):
+        def parse(v):
+            try:
+                return tuple(int(x) for x in v.strip().split("."))
+            except Exception:
+                return (0,)
+        return parse(latest) > parse(current)
+
+
 class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -139,6 +198,8 @@ class LauncherWindow(QMainWindow):
 
         self.all_manifest_versions = []
         self.manifest_fetcher = None
+        self._update_checker = None
+        self._update_url = None
         self._username_checker = None
         self._username_check_timer = QTimer(self)
         self._username_check_timer.setSingleShot(True)
@@ -163,6 +224,7 @@ class LauncherWindow(QMainWindow):
         self._load_settings()
         self.refresh_versions()
         self._fetch_manifest()
+        self._start_update_checker()
 
     # ── UI ──────────────────────────────────────────────────────
 
@@ -682,6 +744,71 @@ class LauncherWindow(QMainWindow):
                 "sudo ufw allow 25565/tcp"
             )
 
+    # ── Auto-update ───────────────────────────────────────────
+
+    def _start_update_checker(self):
+        self._update_checker = UpdateChecker()
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.start()
+
+    def _on_update_available(self, tag, url):
+        self._update_url = url
+        self._update_btn = QPushButton(f"Update {tag} available — click to install")
+        self._update_btn.setStyleSheet(
+            "color: #3fb950; border: none; font-weight: 600; padding: 0 8px;"
+        )
+        self._update_btn.setCursor(Qt.PointingHandCursor)
+        self._update_btn.clicked.connect(self._do_update)
+        self.statusBar().addPermanentWidget(self._update_btn)
+
+    def _do_update(self):
+        if not getattr(sys, 'frozen', False):
+            QMessageBox.information(
+                self, "Update",
+                "Running from source — use git pull to update."
+            )
+            return
+        reply = QMessageBox.question(
+            self, "Update",
+            f"Download and install the update now?\nThe app will restart automatically.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        current = Path(sys.executable)
+        self.status_label.setText("Downloading update...")
+        try:
+            from urllib.request import urlopen
+            with urlopen(self._update_url, timeout=120) as resp:
+                data = resp.read()
+
+            if sys.platform == "win32":
+                new_exe = current.with_name("launcher_new.exe")
+                new_exe.write_bytes(data)
+                bat = current.with_name("update.bat")
+                bat.write_text(
+                    "@echo off\n"
+                    "timeout /t 2 /nobreak >nul\n"
+                    f"move /y \"{new_exe}\" \"{current}\"\n"
+                    f"start \"\" \"{current}\"\n"
+                    "del \"%~f0\"\n",
+                    encoding="ascii",
+                )
+                subprocess.Popen(["cmd", "/c", str(bat)], close_fds=True)
+                QApplication.instance().quit()
+            else:
+                import stat as _stat
+                tmp = current.with_name(current.name + ".new")
+                tmp.write_bytes(data)
+                tmp.chmod(tmp.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
+                os.replace(str(tmp), str(current))
+                os.execv(str(current), sys.argv)
+        except Exception as exc:
+            QMessageBox.warning(self, "Update failed", str(exc))
+            self.status_label.setText("Update failed.")
+
     def _open_mods_folder(self):
         base_dir = self.base_dir_edit.text().strip()
         if not base_dir:
@@ -884,6 +1011,14 @@ class LauncherWindow(QMainWindow):
         self.installed_combo.setEnabled(True)
         self._pending_selected_version = ""
 
+    # ── Script helpers ─────────────────────────────────────────
+
+    def _script_args(self, script_path, extra_args):
+        """Build the args list to run a script, supporting both frozen and source modes."""
+        if getattr(sys, 'frozen', False):
+            return [sys.executable, '--script', Path(script_path).stem] + extra_args
+        return [sys.executable, str(script_path)] + extra_args
+
     # ── Script checks ──────────────────────────────────────────
 
     def _ensure_scripts(self):
@@ -932,15 +1067,16 @@ class LauncherWindow(QMainWindow):
             QMessageBox.warning(self, "No version", "Wait for versions to load or select one.")
             return
 
-        args = [sys.executable, str(self.downloader_path), version_id, "--base-dir", base_dir]
+        extra = [version_id, "--base-dir", base_dir]
         if self.no_assets_check.isChecked():
-            args.append("--no-assets")
+            extra.append("--no-assets")
         if self.include_server_check.isChecked():
-            args.append("--include-server")
+            extra.append("--include-server")
         if self.include_mappings_check.isChecked():
-            args.append("--include-mappings")
+            extra.append("--include-mappings")
         if self.verify_check.isChecked():
-            args.append("--verify")
+            extra.append("--verify")
+        args = self._script_args(self.downloader_path, extra)
 
         # Auto-show logs during download
         self.log_toggle.setChecked(True)
@@ -973,34 +1109,32 @@ class LauncherWindow(QMainWindow):
             )
             return
 
-        args = [sys.executable, str(self.launcher_path), version_id, "--base-dir", base_dir]
-
+        extra = [version_id, "--base-dir", base_dir]
         game_dir = self.game_dir_edit.text().strip()
         if game_dir:
-            args += ["--game-dir", game_dir]
+            extra += ["--game-dir", game_dir]
         java_path = self.java_edit.text().strip()
         if java_path:
-            args += ["--java", java_path]
+            extra += ["--java", java_path]
         username = self.username_edit.text().strip()
         if username:
-            args += ["--username", username]
-
+            extra += ["--username", username]
         ram = self._get_ram()
-        args += ["--xmx", ram]
-
+        extra += ["--xmx", ram]
         if self.xms_edit.text().strip():
-            args += ["--xms", self.xms_edit.text().strip()]
+            extra += ["--xms", self.xms_edit.text().strip()]
         if self.xss_edit.text().strip():
-            args += ["--xss", self.xss_edit.text().strip()]
+            extra += ["--xss", self.xss_edit.text().strip()]
         if self.width_spin.value() > 0 and self.height_spin.value() > 0:
-            args += ["--width", str(self.width_spin.value())]
-            args += ["--height", str(self.height_spin.value())]
+            extra += ["--width", str(self.width_spin.value())]
+            extra += ["--height", str(self.height_spin.value())]
         if self.demo_check.isChecked():
-            args.append("--demo")
+            extra.append("--demo")
         if self.dry_run_check.isChecked():
-            args.append("--dry-run")
+            extra.append("--dry-run")
         if not self.official_flags_check.isChecked():
-            args.append("--no-official-jvm-flags")
+            extra.append("--no-official-jvm-flags")
+        args = self._script_args(self.launcher_path, extra)
 
         self.start_main_process(args, f"Launching {version_id}...")
 
@@ -1017,11 +1151,12 @@ class LauncherWindow(QMainWindow):
             QMessageBox.warning(self, "No version", "Wait for versions to load or select one.")
             return
 
-        args = [sys.executable, str(self.server_downloader_path), version_id, "--servers-dir", servers_dir]
+        extra = [version_id, "--servers-dir", servers_dir]
         if self.verify_check.isChecked():
-            args.append("--verify")
+            extra.append("--verify")
         if self.include_mappings_check.isChecked():
-            args.append("--include-mappings")
+            extra.append("--include-mappings")
+        args = self._script_args(self.server_downloader_path, extra)
 
         self.log_toggle.setChecked(True)
         self.start_main_process(args, f"Downloading server {version_id}...")
@@ -1040,30 +1175,25 @@ class LauncherWindow(QMainWindow):
             QMessageBox.warning(self, "No version", "Select a version.")
             return
 
-        args = [
-            sys.executable,
-            str(self.server_launcher_path),
-            version_id,
-            "--servers-dir", servers_dir,
-            "--minecraft-dir", base_dir,
-        ]
+        extra = [version_id, "--servers-dir", servers_dir, "--minecraft-dir", base_dir]
         java_path = self.java_edit.text().strip()
         if java_path:
-            args += ["--java", java_path]
+            extra += ["--java", java_path]
         ram = self._get_ram()
-        args += ["--xmx", ram]
+        extra += ["--xmx", ram]
         if self.xms_edit.text().strip():
-            args += ["--xms", self.xms_edit.text().strip()]
+            extra += ["--xms", self.xms_edit.text().strip()]
         if self.server_accept_eula_check.isChecked():
-            args.append("--accept-eula")
+            extra.append("--accept-eula")
         if self.server_gui_check.isChecked():
-            args.append("--gui")
+            extra.append("--gui")
         if self.server_restart_check.isChecked():
-            args.append("--restart-if-running")
+            extra.append("--restart-if-running")
         if self.server_offline_check.isChecked():
-            args.append("--offline-mode")
+            extra.append("--offline-mode")
         if self.dry_run_check.isChecked():
-            args.append("--dry-run")
+            extra.append("--dry-run")
+        args = self._script_args(self.server_launcher_path, extra)
 
         self.start_server_process(args, f"Launching server {version_id}...")
 

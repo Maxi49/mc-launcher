@@ -7,6 +7,11 @@ __pycache__/
 launcher_settings.json
 version_manifest_cache.json
 
+# Build output
+dist/
+build/
+*.spec
+
 # IDE
 .vscode/
 .idea/
