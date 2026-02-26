@@ -422,9 +422,14 @@ class LauncherWindow(QMainWindow):
         self.server_accept_eula_check = QCheckBox("Auto accept EULA")
         self.server_gui_check = QCheckBox("Enable server GUI")
         self.server_restart_check = QCheckBox("Restart if running")
+        self.server_offline_check = QCheckBox("Offline mode (online-mode=false)")
         srv_form.addRow(self.server_accept_eula_check)
         srv_form.addRow(self.server_gui_check)
         srv_form.addRow(self.server_restart_check)
+        srv_form.addRow(self.server_offline_check)
+        firewall_btn = QPushButton("Open firewall port 25565")
+        firewall_btn.clicked.connect(self._open_firewall_port)
+        srv_form.addRow(firewall_btn)
         dev_layout.addWidget(server_group)
 
         self.dev_panel.setVisible(False)
@@ -651,6 +656,32 @@ class LauncherWindow(QMainWindow):
         except OSError as e:
             self.status_label.setText(f"Failed to toggle mod: {e}")
 
+    def _open_firewall_port(self):
+        if sys.platform == "win32":
+            import ctypes
+            result = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", "netsh",
+                "advfirewall firewall add rule name=\"Minecraft Server\" "
+                "dir=in action=allow protocol=TCP localport=25565",
+                None, 1,
+            )
+            if result > 32:
+                QMessageBox.information(self, "Firewall", "Firewall rule added (port 25565 TCP).")
+            else:
+                QMessageBox.warning(self, "Firewall", "Could not add firewall rule. Try running as administrator.")
+        elif sys.platform == "darwin":
+            QMessageBox.information(
+                self, "Firewall",
+                "On macOS the system prompts automatically when Java first accepts connections.\n"
+                "No manual action needed."
+            )
+        else:
+            QMessageBox.information(
+                self, "Firewall",
+                "Run this command in a terminal:\n\n"
+                "sudo ufw allow 25565/tcp"
+            )
+
     def _open_mods_folder(self):
         base_dir = self.base_dir_edit.text().strip()
         if not base_dir:
@@ -771,6 +802,7 @@ class LauncherWindow(QMainWindow):
         self.server_accept_eula_check.setChecked(settings.get("server_accept_eula", True))
         self.server_gui_check.setChecked(settings.get("server_gui", False))
         self.server_restart_check.setChecked(settings.get("server_restart", True))
+        self.server_offline_check.setChecked(settings.get("server_offline_mode", True))
         if not self.servers_dir_edit.text().strip():
             self.servers_dir_edit.setText(
                 str(Path(self.base_dir_edit.text().strip() or default_base_dir()) / "servers")
@@ -801,6 +833,7 @@ class LauncherWindow(QMainWindow):
             "server_accept_eula": self.server_accept_eula_check.isChecked(),
             "server_gui": self.server_gui_check.isChecked(),
             "server_restart": self.server_restart_check.isChecked(),
+            "server_offline_mode": self.server_offline_check.isChecked(),
             "selected_version": self.installed_combo.currentText(),
         }
         save_settings(settings)
@@ -1027,6 +1060,8 @@ class LauncherWindow(QMainWindow):
             args.append("--gui")
         if self.server_restart_check.isChecked():
             args.append("--restart-if-running")
+        if self.server_offline_check.isChecked():
+            args.append("--offline-mode")
         if self.dry_run_check.isChecked():
             args.append("--dry-run")
 

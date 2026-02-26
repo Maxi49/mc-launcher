@@ -23,6 +23,26 @@ def ensure_eula(server_dir):
     eula_path.write_text(eula_content, encoding="utf-8")
 
 
+def set_online_mode(server_dir, online):
+    props_path = server_dir / "server.properties"
+    value = "true" if online else "false"
+    if props_path.exists():
+        lines = props_path.read_text(encoding="utf-8").splitlines()
+        new_lines = []
+        found = False
+        for line in lines:
+            if line.startswith("online-mode="):
+                new_lines.append(f"online-mode={value}")
+                found = True
+            else:
+                new_lines.append(line)
+        if not found:
+            new_lines.append(f"online-mode={value}")
+        props_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    else:
+        props_path.write_text(f"online-mode={value}\n", encoding="utf-8")
+
+
 def _encode_ps_command(script):
     return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
@@ -116,6 +136,11 @@ def main():
         help="If server process for this folder is running, kill it and relaunch",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print command and exit")
+    parser.add_argument(
+        "--offline-mode",
+        action="store_true",
+        help="Set online-mode=false in server.properties (allows offline/cracked clients)",
+    )
     args = parser.parse_args()
 
     servers_dir = Path(args.servers_dir)
@@ -165,6 +190,8 @@ def main():
 
     if args.accept_eula:
         ensure_eula(server_dir)
+    if args.offline_mode:
+        set_online_mode(server_dir, online=False)
 
     running_pids = find_running_server_pids(server_jar)
     if running_pids:
