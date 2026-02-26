@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir /s /b \"%LOCALAPPDATA%\\\\Packages\\\\Microsoft.4297127D64EC6_8wekyb3d8bbwe\\\\*\")",
+      "Bash(findstr:*)",
+      "Bash(powershell:*)",
+      "Bash(pip install:*)",
+      "Bash(dir \"%USERPROFILE%\\\\.mitmproxy\\\\*.pem\")",
+      "Bash(dir \"%USERPROFILE%\\\\.mitmproxy\\\\*\")",
+      "WebSearch",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(node -e:*)",
+      "Bash(/tmp/parse2.js:*)",
+      "Bash(node:*)",
+      "Bash(/tmp/parse3.js:*)",
+      "Bash(/tmp/parse4.js:*)",
+      "Bash(/tmp/parse5.js:*)",
+      "Bash(wc:*)",
+      "WebFetch(domain:c4k3.github.io)",
+      "WebFetch(domain:minecraft-launcher-lib.readthedocs.io)",
+      "WebFetch(domain:minecraft.wiki)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:launchermeta.mojang.com)",
+      "Bash(git -C /c/Users/Usuario/Desktop/test remote -v)",
+      "Bash(git -C /c/Users/Usuario/Desktop/test remote set-url:*)",
+      "Bash(git -C /c/Users/Usuario/Desktop/test status)",
+      "Bash(git -C /c/Users/Usuario/Desktop/test log --oneline -3)",
+      "Bash(git -C /c/Users/Usuario/Desktop/test add .)"
+    ]
+  }
+}

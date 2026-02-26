@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime data
+.minecraft/
+launcher_settings.json
+version_manifest_cache.json
+
+# IDE
+.vscode/
+.idea/
+*.swp

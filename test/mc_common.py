@@ -1,0 +1,415 @@
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import stat
+import sys
+import time
+from pathlib import Path
+from urllib.request import urlopen
+
+try:
+    import requests as _requests
+except ImportError:
+    _requests = None
+
+# ── Constants ─────────────────────────────────────────────────
+
+CHUNK_SIZE = 1024 * 128
+RUNTIME_DOWNLOAD_TIMEOUT = 60
+DEFAULT_RUNTIME_INDEX_URL = (
+    "https://launchermeta.mojang.com/v1/products/java-runtime/"
+    "2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json"
+)
+RUNTIME_INDEX_URL_RE = re.compile(
+    r"https://(?:launchermeta|piston-meta)\.mojang\.com/v1/products/"
+    r"java-runtime/[0-9a-f]{40}/all\.json"
+)
+MANIFEST_URL = "https://launchermeta.mojang.com/mc/game/version_manifest.json"
+MOJANG_PROFILE_URL = "https://api.mojang.com/users/profiles/minecraft/"
+REQUEST_TIMEOUT = (10, 60)
+DOWNLOAD_MAX_RETRIES = 3
+DOWNLOAD_RETRY_DELAY = 2
+
+# ── I/O and network (urllib, no requests) ─────────────────────
+
+
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def fetch_json_url(url):
+    with urlopen(url, timeout=RUNTIME_DOWNLOAD_TIMEOUT) as fh:
+        return json.loads(fh.read())
+
+
+def download_url_file(url, dest, expected_size=None, expected_sha1=None):
+    if dest.exists() and expected_size is not None:
+        if dest.stat().st_size == expected_size:
+            return False
+    elif dest.exists() and expected_size is None:
+        return False
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    last_exc = None
+    for attempt in range(1, DOWNLOAD_MAX_RETRIES + 1):
+        try:
+            hasher = hashlib.sha1() if expected_sha1 else None
+            with urlopen(url, timeout=RUNTIME_DOWNLOAD_TIMEOUT) as fh, open(dest, "wb") as out:
+                while True:
+                    chunk = fh.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    if hasher:
+                        hasher.update(chunk)
+
+            if expected_size is not None and dest.stat().st_size != expected_size:
+                raise IOError(f"size mismatch for {dest} (expected {expected_size}, got {dest.stat().st_size})")
+            if hasher and expected_sha1:
+                actual = hasher.hexdigest()
+                if actual.lower() != expected_sha1.lower():
+                    raise IOError(f"sha1 mismatch for {dest} (expected {expected_sha1}, got {actual})")
+            return True
+        except (OSError, IOError) as exc:
+            last_exc = exc
+            if dest.exists():
+                dest.unlink()
+            if attempt < DOWNLOAD_MAX_RETRIES:
+                print(f"retry {attempt}/{DOWNLOAD_MAX_RETRIES} for {dest}: {exc}")
+                time.sleep(DOWNLOAD_RETRY_DELAY * attempt)
+    raise OSError(f"failed to download {url} after {DOWNLOAD_MAX_RETRIES} attempts: {last_exc}")
+
+
+def sha1_file(path):
+    hasher = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(CHUNK_SIZE), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+# ── I/O and network (requests session) ───────────────────────
+
+
+def fetch_json(session, url):
+    resp = session.get(url, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def download_file(session, url, dest, expected_size=None, expected_sha1=None, verify_sha1=False):
+    if dest.exists():
+        if expected_size is not None and dest.stat().st_size == expected_size:
+            if not verify_sha1:
+                return False
+            if expected_sha1 and sha1_file(dest).lower() == expected_sha1.lower():
+                return False
+        if expected_size is None and not verify_sha1:
+            return False
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    last_exc = None
+    for attempt in range(1, DOWNLOAD_MAX_RETRIES + 1):
+        try:
+            with session.get(url, stream=True, timeout=REQUEST_TIMEOUT) as resp:
+                resp.raise_for_status()
+                with open(dest, "wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=CHUNK_SIZE):
+                        if chunk:
+                            fh.write(chunk)
+
+            if expected_size is not None and dest.stat().st_size != expected_size:
+                raise IOError(f"size mismatch for {dest} (expected {expected_size}, got {dest.stat().st_size})")
+            if verify_sha1 and expected_sha1:
+                actual = sha1_file(dest)
+                if actual.lower() != expected_sha1.lower():
+                    raise IOError(f"sha1 mismatch for {dest} (expected {expected_sha1}, got {actual})")
+            return True
+        except (OSError, IOError) as exc:
+            last_exc = exc
+            if dest.exists():
+                dest.unlink()
+            if attempt < DOWNLOAD_MAX_RETRIES:
+                print(f"retry {attempt}/{DOWNLOAD_MAX_RETRIES} for {dest}: {exc}")
+                time.sleep(DOWNLOAD_RETRY_DELAY * attempt)
+    raise OSError(f"failed to download {url} after {DOWNLOAD_MAX_RETRIES} attempts: {last_exc}")
+
+
+# ── Mojang rules ──────────────────────────────────────────────
+
+
+def rule_matches(rule, os_name, os_arch, os_version, features):
+    os_rule = rule.get("os", {})
+    if os_rule:
+        if "name" in os_rule and os_rule["name"] != os_name:
+            return False
+        if "arch" in os_rule and os_rule["arch"] != os_arch:
+            return False
+        if "version" in os_rule:
+            try:
+                if not re.search(os_rule["version"], os_version):
+                    return False
+            except re.error:
+                return False
+    feature_rule = rule.get("features", {})
+    for key, value in feature_rule.items():
+        if features.get(key) != value:
+            return False
+    return True
+
+
+def allowed_by_rules(rules, os_name, os_arch, os_version, features):
+    if not rules:
+        return True
+    allowed = False
+    for rule in rules:
+        if rule_matches(rule, os_name, os_arch, os_version, features):
+            allowed = rule.get("action") == "allow"
+    return allowed
+
+
+# ── OS helpers ────────────────────────────────────────────────
+
+
+def current_os_name():
+    """Returns Mojang OS name: 'windows', 'osx', or 'linux'."""
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "osx"
+    return "linux"
+
+
+def default_minecraft_dir():
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA", ".")) / ".minecraft"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "minecraft"
+    return Path.home() / ".minecraft"
+
+
+# ── Architecture ──────────────────────────────────────────────
+
+
+def detect_arch():
+    machine = platform.machine().lower()
+    bits = 64 if sys.maxsize > 2**32 else 32
+    if machine in ("arm64", "aarch64"):
+        return "arm64", bits
+    if bits == 32:
+        return "x86", bits
+    return "x64", bits
+
+
+# ── Java runtime ─────────────────────────────────────────────
+
+
+def runtime_platform_key(os_arch):
+    if sys.platform == "darwin":
+        return "mac-os-arm64" if os_arch == "arm64" else "mac-os"
+    if sys.platform == "win32":
+        if os_arch == "x86":   return "windows-x86"
+        if os_arch == "arm64": return "windows-arm64"
+        return "windows-x64"
+    return "linux-i386" if os_arch == "x86" else "linux"
+
+
+def runtime_os_folder(base_dir, component, os_key):
+    runtime_dir = base_dir / "runtime" / component
+    if runtime_dir.exists():
+        if sys.platform == "darwin":
+            fallbacks = (os_key, "mac-os", "mac-os-arm64")
+        elif sys.platform == "win32":
+            fallbacks = (os_key, "windows-x64", "windows-arm64", "windows-x86", "windows")
+        else:
+            fallbacks = (os_key, "linux", "linux-i386")
+        for name in fallbacks:
+            if (runtime_dir / name).exists():
+                return name
+    return os_key
+
+
+def find_runtime_index_url(base_dir):
+    log_paths = sorted(
+        base_dir.glob("launcher_log*.txt"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for path in log_paths:
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    match = RUNTIME_INDEX_URL_RE.search(line)
+                    if match:
+                        return match.group(0)
+        except OSError:
+            continue
+    return DEFAULT_RUNTIME_INDEX_URL
+
+
+def select_runtime_manifest(index_data, os_key, component):
+    platform_data = index_data.get(os_key, {})
+    entries = platform_data.get(component, [])
+    if not entries:
+        return None, None
+    entries = sorted(
+        entries,
+        key=lambda e: e.get("version", {}).get("released", ""),
+        reverse=True,
+    )
+    entry = entries[0]
+    manifest = entry.get("manifest", {})
+    return manifest.get("url"), entry.get("version", {}).get("name")
+
+
+def ensure_java_runtime(base_dir, component, os_arch):
+    os_key = runtime_platform_key(os_arch)
+
+    if sys.platform == "win32":
+        store_runtime = (
+            Path(os.environ.get("LOCALAPPDATA", "."))
+            / "Packages"
+            / "Microsoft.4297127D64EC6_8wekyb3d8bbwe"
+            / "LocalCache"
+            / "Local"
+            / "runtime"
+            / component
+            / os_key
+            / component
+        )
+        store_javaw = store_runtime / "bin" / "javaw.exe"
+        store_java = store_runtime / "bin" / "java.exe"
+        if store_javaw.exists() or store_java.exists():
+            return store_javaw if store_javaw.exists() else store_java
+
+    os_folder = runtime_os_folder(base_dir, component, os_key)
+    runtime_root = base_dir / "runtime" / component / os_folder / component
+    if sys.platform == "win32":
+        javaw = runtime_root / "bin" / "javaw.exe"
+        java = runtime_root / "bin" / "java.exe"
+    else:
+        javaw = None
+        java = runtime_root / "bin" / "java"
+    if (javaw is not None and javaw.exists()) or java.exists():
+        return javaw if (javaw is not None and javaw.exists()) else java
+
+    index_url = find_runtime_index_url(base_dir)
+    print(f"downloading runtime manifest from {index_url}...")
+    try:
+        index_data = fetch_json_url(index_url)
+    except OSError as exc:
+        print(f"failed to download runtime index: {exc}", file=sys.stderr)
+        return None
+    manifest_url, version_name = select_runtime_manifest(index_data, os_key, component)
+    if not manifest_url:
+        print(
+            f"runtime component not found: {component} for {os_key}",
+            file=sys.stderr,
+        )
+        return None
+
+    print(f"downloading java runtime {component} ({version_name})...")
+    try:
+        manifest = fetch_json_url(manifest_url)
+    except OSError as exc:
+        print(f"failed to download runtime manifest: {exc}", file=sys.stderr)
+        return None
+    files = manifest.get("files", {})
+    file_items = [(p, info) for p, info in files.items()]
+    total = len(file_items)
+
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    for idx, (rel_path, info) in enumerate(file_items, 1):
+        entry_type = info.get("type")
+        dest = runtime_root / rel_path
+        if entry_type == "directory":
+            dest.mkdir(parents=True, exist_ok=True)
+            continue
+        if entry_type != "file":
+            continue
+        downloads = info.get("downloads", {})
+        raw = downloads.get("raw")
+        if not raw:
+            continue
+        download_url_file(
+            raw["url"],
+            dest,
+            expected_size=raw.get("size"),
+            expected_sha1=raw.get("sha1"),
+        )
+        if sys.platform != "win32" and info.get("executable"):
+            dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        if idx % 100 == 0 or idx == total:
+            print(f"  runtime progress: {idx}/{total}")
+
+    version_file = runtime_root.parent / ".version"
+    if version_name:
+        version_file.write_text(version_name, encoding="utf-8")
+
+    if javaw is not None and javaw.exists():
+        return javaw
+    return java if java.exists() else None
+
+
+def find_java(java_arg):
+    if java_arg:
+        return java_arg
+    names = ("javaw.exe", "java.exe", "javaw", "java") if sys.platform == "win32" else ("java",)
+    for name in names:
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+# ── Utilities ─────────────────────────────────────────────────
+
+
+def find_version(manifest, version_id):
+    for entry in manifest.get("versions", []):
+        if entry.get("id") == version_id:
+            return entry
+    return None
+
+
+def format_cmd(args):
+    return " ".join(f"\"{a}\"" if " " in a else a for a in args)
+
+
+# ── Username validation ──────────────────────────────────────
+
+
+def check_username_taken(username):
+    """Check if a Minecraft username is taken by a premium account.
+
+    Returns a dict with:
+      - "taken": True/False/None (None = could not determine)
+      - "uuid": the account UUID if taken, else None
+      - "correct_name": the exact casing of the name if taken
+      - "error": error message string if the check failed
+    """
+    url = MOJANG_PROFILE_URL + username
+    try:
+        with urlopen(url, timeout=10) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read())
+                return {
+                    "taken": True,
+                    "uuid": data.get("id"),
+                    "correct_name": data.get("name"),
+                    "error": None,
+                }
+    except Exception as exc:
+        code = getattr(exc, "code", None)
+        if code in (204, 404):
+            return {"taken": False, "uuid": None, "correct_name": None, "error": None}
+        return {
+            "taken": None,
+            "uuid": None,
+            "correct_name": None,
+            "error": str(exc),
+        }
+    return {"taken": False, "uuid": None, "correct_name": None, "error": None}
