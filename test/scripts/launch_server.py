@@ -1,6 +1,7 @@
 import argparse
 import base64
 import os
+import re
 import subprocess
 import sys
 import time
@@ -145,9 +146,17 @@ def main():
 
     servers_dir = Path(args.servers_dir)
     minecraft_dir = Path(args.minecraft_dir)
-    server_dir = servers_dir / args.version_id
+
+    # If a Fabric client version is selected (e.g. fabric-loader-0.16.5-1.21.1),
+    # the server lives under the base MC version directory (1.21.1).
+    version_id = args.version_id
+    mc_version_id = re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+    server_dir = servers_dir / mc_version_id
+    if mc_version_id != version_id:
+        print(f"Fabric version detected — using server dir for {mc_version_id}")
+
     server_jar = server_dir / "server.jar"
-    version_json = server_dir / f"{args.version_id}.json"
+    version_json = server_dir / f"{mc_version_id}.json"
 
     fabric_jar = server_dir / "fabric-server-launch.jar"
     if fabric_jar.exists():
@@ -157,6 +166,12 @@ def main():
         print(f"missing server jar: {server_jar}", file=sys.stderr)
         print("run download_server.py (or install_fabric.py --server) first", file=sys.stderr)
         return 1
+
+    # Java version lookup: server dir JSON first, then client versions dir as fallback
+    if not version_json.exists():
+        client_json = minecraft_dir / "versions" / mc_version_id / f"{mc_version_id}.json"
+        if client_json.exists():
+            version_json = client_json
 
     java_exe = args.java
     if not java_exe and version_json.exists():
