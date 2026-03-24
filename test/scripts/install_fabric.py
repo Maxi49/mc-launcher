@@ -4,6 +4,8 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from urllib.request import urlopen, Request
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mc_common import fetch_json_url, download_url_file
@@ -33,6 +35,43 @@ def _latest_installer():
     if not data:
         raise RuntimeError("Could not fetch Fabric installer versions")
     return data[0]["version"]
+
+
+def _install_fabric_api(mc_version, base_dir):
+    """Download Fabric API from Modrinth for the given MC version."""
+    mods_dir = Path(base_dir) / "mods"
+    mods_dir.mkdir(parents=True, exist_ok=True)
+
+    # Skip if any fabric-api jar already exists for this version
+    for f in mods_dir.iterdir():
+        if f.name.startswith("fabric-api") and mc_version in f.name and f.suffix == ".jar":
+            print(f"Fabric API already present: {f.name}")
+            return
+
+    print(f"Downloading Fabric API for {mc_version} from Modrinth...")
+    try:
+        url = (
+            f"https://api.modrinth.com/v2/project/fabric-api/version"
+            f"?game_versions=[%22{quote(mc_version, safe='')}%22]"
+            f"&loaders=[%22fabric%22]"
+        )
+        req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
+        with urlopen(req, timeout=30) as resp:
+            versions = json.loads(resp.read())
+        if not versions:
+            print(f"  No Fabric API version found for MC {mc_version}")
+            return
+        file_info = versions[0]["files"][0]
+        filename = file_info["filename"]
+        file_url = file_info["url"]
+        dest = mods_dir / filename
+        if dest.exists():
+            print(f"  {filename} already exists.")
+            return
+        download_url_file(file_url, dest)
+        print(f"  Saved: {filename}")
+    except Exception as e:
+        print(f"  Warning: could not download Fabric API: {e}")
 
 
 def install_client(mc_version, base_dir, loader_version):
@@ -103,6 +142,10 @@ def install_client(mc_version, base_dir, loader_version):
             print(f"  Warning: {Path(path).name}: {e}")
 
     print(f"Libraries: {ok}/{len(libs)} ready")
+
+    # Auto-download Fabric API
+    _install_fabric_api(mc_version, base_dir)
+
     print(f"\nFabric installed: {fabric_id}")
     print("Select this version in the launcher to play with mods.")
     return 0

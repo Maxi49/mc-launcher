@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
-    QFrame,
     QGraphicsOpacityEffect,
     QGroupBox,
     QHBoxLayout,
@@ -43,6 +42,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -184,11 +184,159 @@ class UpdateChecker(QThread):
         return parse(latest) > parse(current)
 
 
+def _resolve_mc_version(version_name):
+    """Extract the base Minecraft version from a loader version string.
+
+    Examples:
+        fabric-loader-0.16.5-1.21.1  -> 1.21.1
+        1.20.1-forge-47.3.0          -> 1.20.1
+        1.21.1                       -> 1.21.1
+    """
+    import re
+    # Fabric: MC version is last segment  e.g. fabric-loader-0.16.5-1.21.1
+    if "fabric" in version_name.lower():
+        matches = re.findall(r'(\d+\.\d+(?:\.\d+)?)', version_name)
+        return matches[-1] if matches else version_name
+    # Forge / vanilla: MC version is first segment  e.g. 1.20.1-forge-47.3.0
+    m = re.search(r'(\d+\.\d+(?:\.\d+)?)', version_name)
+    return m.group(1) if m else version_name
+
+
+def _detect_version_loader(version_name):
+    """Detect the mod loader from a version directory name.
+
+    Returns 'fabric', 'forge', or 'vanilla'.
+    """
+    lower = version_name.lower()
+    if "fabric" in lower:
+        return "fabric"
+    if "forge" in lower:
+        return "forge"
+    return "vanilla"
+
+
+def _extract_mod_mc_version(filename):
+    """Extract MC version from mod filename.
+
+    Patterns:
+      mod-name+mc1.21.1.jar   -> 1.21.1
+      mod-name+1.21.1.jar     -> 1.21.1
+      mod-name-mc1.21.1.jar   -> 1.21.1
+      mod-name_MC_1.21.1.jar  -> 1.21.1
+      mod-name-1.21.1.jar     -> 1.21.1  (last mc-like version)
+    Returns None if no version detected.
+    """
+    import re
+    stem = Path(filename).stem
+    m = re.search(r'\+(?:mc)?(\d+\.\d+(?:\.\d+)?)', stem, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r'[-_]mc[_.]?(\d+\.\d+(?:\.\d+)?)', stem, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    matches = re.findall(r'(\d+\.\d+(?:\.\d+)?)', stem)
+    return matches[-1] if matches else None
+
+
+class ModrinthShaderSearcher(QThread):
+    """Search Modrinth for shader packs in background."""
+    finished = Signal(list)
+    error = Signal(str)
+
+    def __init__(self, query="", mc_version="", parent=None):
+        super().__init__(parent)
+        self.query = query
+        self.mc_version = mc_version
+
+    def run(self):
+        try:
+            from urllib.request import urlopen, Request
+            from urllib.parse import quote
+            import json as _json
+
+            facets = '[["project_type:shader"]]'
+            if self.mc_version:
+                facets = (
+                    f'[["project_type:shader"],'
+                    f'["versions:{self.mc_version}"]]'
+                )
+            url = (
+                f"https://api.modrinth.com/v2/search"
+                f"?facets={quote(facets, safe='')}"
+                f"&query={quote(self.query, safe='')}"
+                f"&limit=20"
+            )
+            req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
+            with urlopen(req, timeout=30) as resp:
+                data = _json.loads(resp.read())
+
+            hits = []
+            for h in data.get("hits", []):
+                hits.append({
+                    "title": h.get("title", ""),
+                    "slug": h.get("slug", ""),
+                    "author": h.get("author", ""),
+                    "downloads": h.get("downloads", 0),
+                    "icon_url": h.get("icon_url", ""),
+                })
+            self.finished.emit(hits)
+        except Exception as exc:
+            self.error.emit(str(exc))
+            self.finished.emit([])
+
+
+class ShaderPackDownloader(QThread):
+    """Download a shader pack .zip from Modrinth in background."""
+    finished = Signal(bool, str)  # success, message
+
+    def __init__(self, slug, mc_version, dest_dir, parent=None):
+        super().__init__(parent)
+        self.slug = slug
+        self.mc_version = mc_version
+        self.dest_dir = dest_dir
+
+    def run(self):
+        try:
+            from urllib.request import urlopen, Request
+            from urllib.parse import quote
+            import json as _json
+
+            url = (
+                f"https://api.modrinth.com/v2/project"
+                f"/{quote(self.slug, safe='')}/version"
+            )
+            if self.mc_version:
+                url += f"?game_versions=[%22{quote(self.mc_version, safe='')}%22]"
+            req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
+            with urlopen(req, timeout=30) as resp:
+                versions = _json.loads(resp.read())
+
+            if not versions:
+                self.finished.emit(False, f"No versions found for {self.slug}")
+                return
+
+            file_info = versions[0]["files"][0]
+            filename = file_info["filename"]
+            file_url = file_info["url"]
+            dest = Path(self.dest_dir) / filename
+
+            if dest.exists():
+                self.finished.emit(True, f"{filename} already exists.")
+                return
+
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            from mc_common import download_url_file
+            download_url_file(file_url, dest)
+            self.finished.emit(True, f"Downloaded {filename}")
+        except Exception as exc:
+            self.finished.emit(False, str(exc))
+
+
 class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
-        self.resize(620, 700)
+        self.resize(680, 750)
 
         self.script_dir = Path(__file__).resolve().parent
         self.downloader_path = self.script_dir / "scripts" / "download_version.py"
@@ -196,10 +344,14 @@ class LauncherWindow(QMainWindow):
         self.server_downloader_path = self.script_dir / "scripts" / "download_server.py"
         self.server_launcher_path = self.script_dir / "scripts" / "launch_server.py"
         self.fabric_installer_path = self.script_dir / "scripts" / "install_fabric.py"
+        self.forge_installer_path = self.script_dir / "scripts" / "install_forge.py"
+        self.shader_mod_installer_path = self.script_dir / "scripts" / "install_shader_mod.py"
 
         self.all_manifest_versions = []
         self.manifest_fetcher = None
         self._update_checker = None
+        self._shader_searcher = None
+        self._shader_downloader = None
         self._update_url = None
         self._username_checker = None
         self._username_check_timer = QTimer(self)
@@ -230,24 +382,18 @@ class LauncherWindow(QMainWindow):
     # ── UI ──────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # Scroll area so everything works at any window size
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        central = QWidget()
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(14)
 
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(14)
+        # ── Fixed zone (always visible) ────────────────────────
 
         # Header
         header = QLabel("Minecraft Launcher")
         header.setStyleSheet("font-size: 22px; font-weight: 700; color: #58a6ff;")
         header.setAlignment(Qt.AlignCenter)
-        layout.addWidget(header)
-
-        # ── Essential controls ─────────────────────────────────
+        main_layout.addWidget(header)
 
         # Username + RAM in one row
         top_row = QHBoxLayout()
@@ -269,7 +415,7 @@ class LauncherWindow(QMainWindow):
         self.ram_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.ram_combo.setMinimumWidth(70)
         top_row.addWidget(self.ram_combo)
-        layout.addLayout(top_row)
+        main_layout.addLayout(top_row)
 
         # Installed versions (play row)
         play_row = QHBoxLayout()
@@ -277,27 +423,7 @@ class LauncherWindow(QMainWindow):
         self.installed_combo = QComboBox()
         self.installed_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         play_row.addWidget(self.installed_combo, 1)
-        layout.addLayout(play_row)
-
-        # Download row
-        dl_row = QHBoxLayout()
-        dl_row.addWidget(QLabel("Download:"))
-        self.version_combo = QComboBox()
-        self.version_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.version_combo.addItem("Loading...")
-        self.version_combo.setEnabled(False)
-        dl_row.addWidget(self.version_combo, 1)
-        self.download_button = QPushButton("Download")
-        self.download_button.clicked.connect(self.on_download_clicked)
-        dl_row.addWidget(self.download_button)
-        self.install_fabric_button = QPushButton("Install Fabric")
-        self.install_fabric_button.setToolTip(
-            "Install the Fabric mod loader for the selected version.\n"
-            "Download the vanilla version first, then click this."
-        )
-        self.install_fabric_button.clicked.connect(self.on_install_fabric_clicked)
-        dl_row.addWidget(self.install_fabric_button)
-        layout.addLayout(dl_row)
+        main_layout.addLayout(play_row)
 
         # Play button
         self.launch_button = QPushButton("PLAY")
@@ -328,247 +454,22 @@ class LauncherWindow(QMainWindow):
             """
         )
         self.launch_button.clicked.connect(self.on_launch_clicked)
-        # Opacity effect for fade-in animation
         self._play_opacity = QGraphicsOpacityEffect(self.launch_button)
         self._play_opacity.setOpacity(1.0)
         self.launch_button.setGraphicsEffect(self._play_opacity)
-        layout.addWidget(self.launch_button)
+        main_layout.addWidget(self.launch_button)
 
-        # ── Mods panel (collapsible) ──────────────────────────
-        self.mods_toggle = QCheckBox("Mods")
-        self.mods_toggle.toggled.connect(self._toggle_mods_panel)
-        layout.addWidget(self.mods_toggle)
+        # ── Tab widget ─────────────────────────────────────────
 
-        self.mods_panel = QWidget()
-        mods_layout = QVBoxLayout(self.mods_panel)
-        mods_layout.setContentsMargins(0, 0, 0, 0)
-        mods_layout.setSpacing(8)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_home_tab(), "Home")
+        self.tabs.addTab(self._build_mods_tab(), "Mods")
+        self.tabs.addTab(self._build_shaders_tab(), "Shaders")
+        self.tabs.addTab(self._build_server_tab(), "Server")
+        self.tabs.addTab(self._build_settings_tab(), "Settings")
+        main_layout.addWidget(self.tabs, 1)
 
-        self.mods_list = QListWidget()
-        self.mods_list.itemChanged.connect(self._on_mod_toggled)
-        mods_layout.addWidget(self.mods_list)
-
-        mods_buttons = QHBoxLayout()
-        refresh_mods_btn = QPushButton("Refresh")
-        refresh_mods_btn.clicked.connect(self._refresh_mods)
-        open_mods_btn = QPushButton("Open mods folder")
-        open_mods_btn.clicked.connect(self._open_mods_folder)
-        mods_buttons.addWidget(refresh_mods_btn)
-        mods_buttons.addWidget(open_mods_btn)
-        mods_layout.addLayout(mods_buttons)
-
-        self.mods_panel.setVisible(False)
-        layout.addWidget(self.mods_panel)
-
-        # Server buttons
-        server_row = QHBoxLayout()
-        self.download_server_button = QPushButton("Download Server")
-        self.download_server_button.setObjectName("serverButton")
-        self.download_server_button.clicked.connect(self.on_download_server_clicked)
-        self.launch_server_button = QPushButton("Launch Server")
-        self.launch_server_button.setObjectName("serverButton")
-        self.launch_server_button.clicked.connect(self.on_launch_server_clicked)
-        server_row.addWidget(self.download_server_button)
-        server_row.addWidget(self.launch_server_button)
-        layout.addLayout(server_row)
-
-        # ── Game Properties (collapsible) ──────────────────────
-        self.game_props_toggle = QCheckBox("Game Properties")
-        self.game_props_toggle.toggled.connect(self._toggle_game_props_panel)
-        layout.addWidget(self.game_props_toggle)
-
-        self.game_props_panel = QWidget()
-        gp_layout = QVBoxLayout(self.game_props_panel)
-        gp_layout.setContentsMargins(0, 0, 0, 0)
-        gp_layout.setSpacing(8)
-
-        gp_group = QGroupBox("Server world settings")
-        gp_form = QFormLayout(gp_group)
-        gp_form.setLabelAlignment(Qt.AlignLeft)
-
-        self.srv_difficulty_combo = QComboBox()
-        self.srv_difficulty_combo.addItems(["peaceful", "easy", "normal", "hard"])
-        self.srv_difficulty_combo.setCurrentText("easy")
-        gp_form.addRow("Difficulty", self.srv_difficulty_combo)
-
-        self.srv_gamemode_combo = QComboBox()
-        self.srv_gamemode_combo.addItems(["survival", "creative", "adventure", "spectator"])
-        gp_form.addRow("Default gamemode", self.srv_gamemode_combo)
-
-        self.srv_max_players_spin = QSpinBox()
-        self.srv_max_players_spin.setRange(1, 1000)
-        self.srv_max_players_spin.setValue(20)
-        gp_form.addRow("Max players", self.srv_max_players_spin)
-
-        self.srv_pvp_check = QCheckBox("PvP")
-        self.srv_pvp_check.setChecked(True)
-        gp_form.addRow(self.srv_pvp_check)
-
-        self.srv_spawn_monsters_check = QCheckBox("Spawn monsters")
-        self.srv_spawn_monsters_check.setChecked(True)
-        gp_form.addRow(self.srv_spawn_monsters_check)
-
-        self.srv_cmd_blocks_check = QCheckBox("Enable command blocks")
-        gp_form.addRow(self.srv_cmd_blocks_check)
-
-        self.srv_cheats_check = QCheckBox("Allow cheats (op yourself)")
-        self.srv_cheats_check.setChecked(True)
-        gp_form.addRow(self.srv_cheats_check)
-
-        apply_props_btn = QPushButton("Apply to server now")
-        apply_props_btn.clicked.connect(self._apply_game_props_now)
-        gp_form.addRow(apply_props_btn)
-
-        gp_layout.addWidget(gp_group)
-
-        gp_hint = QLabel("Gamerules (keepInventory, etc.) can be set in-game with /gamerule.")
-        gp_hint.setWordWrap(True)
-        gp_hint.setStyleSheet("color: #7f8792; font-size: 11px;")
-        gp_layout.addWidget(gp_hint)
-
-        self.game_props_panel.setVisible(False)
-        layout.addWidget(self.game_props_panel)
-
-        # Separator between main section and logs/dev
-        separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
-        separator.setStyleSheet("QFrame { color: #2d3548; margin: 4px 0; }")
-        layout.addWidget(separator)
-
-        # ── Logs (collapsible) ─────────────────────────────────
-
-        self.log_toggle = QCheckBox("Show logs")
-        self.log_toggle.toggled.connect(self._toggle_logs)
-        layout.addWidget(self.log_toggle)
-
-        self.log_output = QPlainTextEdit()
-        self.log_output.setReadOnly(True)
-        self.log_output.setMaximumBlockCount(2000)
-        self.log_output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.log_output.setMinimumHeight(80)
-        self.log_output.setVisible(False)
-        layout.addWidget(self.log_output, 1)
-
-        # ── Dev settings toggle ────────────────────────────────
-
-        self.dev_toggle = QCheckBox("Dev Settings")
-        self.dev_toggle.toggled.connect(self._toggle_dev_settings)
-        layout.addWidget(self.dev_toggle)
-
-        # Dev settings panel (hidden by default)
-        self.dev_panel = QWidget()
-        dev_layout = QVBoxLayout(self.dev_panel)
-        dev_layout.setContentsMargins(0, 0, 0, 0)
-        dev_layout.setSpacing(8)
-
-        # Paths
-        paths_group = QGroupBox("Paths")
-        paths_form = QFormLayout(paths_group)
-        paths_form.setLabelAlignment(Qt.AlignLeft)
-
-        self.base_dir_edit, base_browse = self._path_row()
-        base_browse.clicked.connect(lambda: self.browse_path(self.base_dir_edit))
-        self.base_dir_edit.editingFinished.connect(self.refresh_versions)
-        paths_form.addRow("Base dir", self._row_widget(self.base_dir_edit, base_browse))
-
-        self.game_dir_edit, game_browse = self._path_row()
-        game_browse.clicked.connect(lambda: self.browse_path(self.game_dir_edit))
-        paths_form.addRow("Game dir", self._row_widget(self.game_dir_edit, game_browse))
-
-        self.servers_dir_edit, servers_browse = self._path_row()
-        servers_browse.clicked.connect(lambda: self.browse_path(self.servers_dir_edit))
-        paths_form.addRow("Servers dir", self._row_widget(self.servers_dir_edit, servers_browse))
-
-        self.java_edit, java_browse = self._path_row()
-        java_browse.clicked.connect(lambda: self.browse_file(self.java_edit))
-        paths_form.addRow("Java path", self._row_widget(self.java_edit, java_browse))
-
-        dev_layout.addWidget(paths_group)
-
-        # Launch options
-        launch_group = QGroupBox("Launch options")
-        launch_form = QFormLayout(launch_group)
-        launch_form.setLabelAlignment(Qt.AlignLeft)
-
-        self.xmx_edit = QLineEdit()
-        self.xmx_edit.setPlaceholderText("Override (e.g. 4G)")
-        launch_form.addRow("Xmx override", self.xmx_edit)
-
-        self.xms_edit = QLineEdit()
-        self.xms_edit.setPlaceholderText("1G")
-        launch_form.addRow("Xms", self.xms_edit)
-
-        self.xss_edit = QLineEdit()
-        self.xss_edit.setPlaceholderText("1M")
-        launch_form.addRow("Xss", self.xss_edit)
-
-        resolution_row = QWidget()
-        res_layout = QHBoxLayout(resolution_row)
-        res_layout.setContentsMargins(0, 0, 0, 0)
-        self.width_spin = QSpinBox()
-        self.width_spin.setRange(0, 10000)
-        self.width_spin.setSpecialValueText("Auto")
-        self.height_spin = QSpinBox()
-        self.height_spin.setRange(0, 10000)
-        self.height_spin.setSpecialValueText("Auto")
-        res_layout.addWidget(self.width_spin)
-        res_layout.addWidget(self.height_spin)
-        launch_form.addRow("Resolution", resolution_row)
-
-        self.demo_check = QCheckBox("Demo mode")
-        self.dry_run_check = QCheckBox("Dry run")
-        self.official_flags_check = QCheckBox("Use official JVM flags")
-        self.official_flags_check.setChecked(True)
-        launch_form.addRow(self.demo_check)
-        launch_form.addRow(self.dry_run_check)
-        launch_form.addRow(self.official_flags_check)
-
-        dev_layout.addWidget(launch_group)
-
-        # Download options
-        download_group = QGroupBox("Download options")
-        dl_form = QFormLayout(download_group)
-        dl_form.setLabelAlignment(Qt.AlignLeft)
-        self.no_assets_check = QCheckBox("Skip assets")
-        self.include_server_check = QCheckBox("Include server.jar")
-        self.include_mappings_check = QCheckBox("Include mappings")
-        self.verify_check = QCheckBox("Verify SHA1 (slow)")
-        self.show_snapshots_check = QCheckBox("Show snapshots in download list")
-        self.show_snapshots_check.toggled.connect(self._populate_version_combo)
-        dl_form.addRow(self.no_assets_check)
-        dl_form.addRow(self.include_server_check)
-        dl_form.addRow(self.include_mappings_check)
-        dl_form.addRow(self.verify_check)
-        dl_form.addRow(self.show_snapshots_check)
-        dev_layout.addWidget(download_group)
-
-        # Server options
-        server_group = QGroupBox("Server options")
-        srv_form = QFormLayout(server_group)
-        srv_form.setLabelAlignment(Qt.AlignLeft)
-        self.server_accept_eula_check = QCheckBox("Auto accept EULA")
-        self.server_gui_check = QCheckBox("Enable server GUI")
-        self.server_restart_check = QCheckBox("Restart if running")
-        self.server_offline_check = QCheckBox("Offline mode (online-mode=false)")
-        self.server_fabric_check = QCheckBox("Fabric server (downloads Fabric launcher)")
-        srv_form.addRow(self.server_accept_eula_check)
-        srv_form.addRow(self.server_gui_check)
-        srv_form.addRow(self.server_restart_check)
-        srv_form.addRow(self.server_offline_check)
-        srv_form.addRow(self.server_fabric_check)
-        firewall_btn = QPushButton("Open firewall port 25565")
-        firewall_btn.clicked.connect(self._open_firewall_port)
-        srv_form.addRow(firewall_btn)
-        dev_layout.addWidget(server_group)
-
-        self.dev_panel.setVisible(False)
-        layout.addWidget(self.dev_panel)
-
-        # Bottom stretch so content hugs the top when small
-        layout.addStretch(0)
-
-        scroll.setWidget(content)
-        self.setCentralWidget(scroll)
+        self.setCentralWidget(central)
 
         self.status_label = QLabel("Ready.")
         self.statusBar().addWidget(self.status_label, 1)
@@ -581,6 +482,28 @@ class LauncherWindow(QMainWindow):
             }
             QScrollArea {
                 background-color: #1a1d23;
+            }
+            QTabWidget::pane {
+                border: 1px solid #2d3548;
+                border-radius: 6px;
+                background: #1a1d23;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: #1e2330;
+                border: 1px solid #2d3548;
+                padding: 8px 16px;
+                margin-right: 2px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+            }
+            QTabBar::tab:selected {
+                background: #1a1d23;
+                border-bottom: none;
+                color: #58a6ff;
+            }
+            QTabBar::tab:hover {
+                background: #252d3b;
             }
             QLineEdit, QPlainTextEdit, QListWidget, QSpinBox, QComboBox {
                 background-color: #1e2330;
@@ -656,6 +579,355 @@ class LauncherWindow(QMainWindow):
             """
         )
 
+    # ── Tab builders ───────────────────────────────────────────
+
+    def _build_home_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # Download row
+        dl_row = QHBoxLayout()
+        dl_row.addWidget(QLabel("Download:"))
+        self.version_combo = QComboBox()
+        self.version_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.version_combo.addItem("Loading...")
+        self.version_combo.setEnabled(False)
+        dl_row.addWidget(self.version_combo, 1)
+        self.download_button = QPushButton("Download")
+        self.download_button.clicked.connect(self.on_download_clicked)
+        dl_row.addWidget(self.download_button)
+        self.install_fabric_button = QPushButton("Install Fabric")
+        self.install_fabric_button.setToolTip(
+            "Install the Fabric mod loader for the selected version.\n"
+            "Download the vanilla version first, then click this."
+        )
+        self.install_fabric_button.clicked.connect(self.on_install_fabric_clicked)
+        dl_row.addWidget(self.install_fabric_button)
+        self.install_forge_button = QPushButton("Install Forge")
+        self.install_forge_button.setToolTip(
+            "Install the Forge mod loader for the selected version.\n"
+            "Download the vanilla version first, then click this.\n"
+            "The Forge installer GUI will open — click 'Install Client'."
+        )
+        self.install_forge_button.clicked.connect(self.on_install_forge_clicked)
+        dl_row.addWidget(self.install_forge_button)
+        layout.addLayout(dl_row)
+
+        # Log output (always visible)
+        log_label = QLabel("Logs")
+        log_label.setStyleSheet("color: #58a6ff; font-weight: 600;")
+        layout.addWidget(log_label)
+
+        self.log_output = QPlainTextEdit()
+        self.log_output.setReadOnly(True)
+        self.log_output.setMaximumBlockCount(2000)
+        self.log_output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.log_output.setMinimumHeight(80)
+        layout.addWidget(self.log_output, 1)
+
+        return tab
+
+    def _build_mods_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # Filter row
+        filter_row = QHBoxLayout()
+        self.mods_show_all_check = QCheckBox("Show all versions")
+        self.mods_show_all_check.toggled.connect(self._refresh_mods)
+        filter_row.addWidget(self.mods_show_all_check)
+        filter_row.addStretch()
+        layout.addLayout(filter_row)
+
+        # Mods list
+        self.mods_list = QListWidget()
+        self.mods_list.setMinimumHeight(100)
+        self.mods_list.itemChanged.connect(self._on_mod_toggled)
+        layout.addWidget(self.mods_list, 1)
+
+        # Buttons
+        mods_buttons = QHBoxLayout()
+        refresh_mods_btn = QPushButton("Refresh")
+        refresh_mods_btn.clicked.connect(self._refresh_mods)
+        open_mods_btn = QPushButton("Open mods folder")
+        open_mods_btn.clicked.connect(self._open_mods_folder)
+        mods_buttons.addWidget(refresh_mods_btn)
+        mods_buttons.addWidget(open_mods_btn)
+        layout.addLayout(mods_buttons)
+
+        # Refresh mods when selected version changes
+        self.installed_combo.currentIndexChanged.connect(self._refresh_mods)
+
+        return tab
+
+    def _build_shaders_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # Install buttons row
+        shader_install_row = QHBoxLayout()
+        self.install_shader_mod_btn = QPushButton("Install Shader Mod")
+        self.install_shader_mod_btn.setToolTip(
+            "Auto-install the shader mod for the selected version's loader.\n"
+            "Fabric: Iris + Sodium | Forge: Oculus + Rubidium"
+        )
+        self.install_shader_mod_btn.clicked.connect(self._on_install_shader_mod)
+        self.optifine_guide_btn = QPushButton("OptiFine Guide")
+        self.optifine_guide_btn.clicked.connect(self._show_optifine_guide)
+        shader_install_row.addWidget(self.install_shader_mod_btn)
+        shader_install_row.addWidget(self.optifine_guide_btn)
+        layout.addLayout(shader_install_row)
+
+        # Installed shader packs
+        sp_label = QLabel("Installed Shader Packs")
+        sp_label.setStyleSheet("color: #58a6ff; font-weight: 600;")
+        layout.addWidget(sp_label)
+
+        self.shaderpacks_list = QListWidget()
+        self.shaderpacks_list.setMinimumHeight(100)
+        self.shaderpacks_list.itemChanged.connect(self._on_shaderpack_toggled)
+        layout.addWidget(self.shaderpacks_list)
+
+        sp_buttons = QHBoxLayout()
+        refresh_sp_btn = QPushButton("Refresh")
+        refresh_sp_btn.clicked.connect(self._refresh_shaderpacks)
+        open_sp_btn = QPushButton("Open shaderpacks folder")
+        open_sp_btn.clicked.connect(self._open_shaderpacks_folder)
+        sp_buttons.addWidget(refresh_sp_btn)
+        sp_buttons.addWidget(open_sp_btn)
+        layout.addLayout(sp_buttons)
+
+        # Browse Modrinth shader packs
+        browse_label = QLabel("Browse Shader Packs (Modrinth)")
+        browse_label.setStyleSheet("color: #58a6ff; font-weight: 600;")
+        layout.addWidget(browse_label)
+
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("Search:"))
+        self.shader_search_edit = QLineEdit()
+        self.shader_search_edit.setPlaceholderText("e.g. Complementary, BSL...")
+        self.shader_search_edit.returnPressed.connect(self._search_shaderpacks)
+        search_row.addWidget(self.shader_search_edit, 1)
+        self.shader_search_btn = QPushButton("Search")
+        self.shader_search_btn.clicked.connect(self._search_shaderpacks)
+        search_row.addWidget(self.shader_search_btn)
+        layout.addLayout(search_row)
+
+        self.shader_results_list = QListWidget()
+        self.shader_results_list.setMinimumHeight(150)
+        layout.addWidget(self.shader_results_list, 1)
+
+        return tab
+
+    def _build_server_tab(self):
+        tab = QWidget()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # Server buttons
+        server_row = QHBoxLayout()
+        self.download_server_button = QPushButton("Download Server")
+        self.download_server_button.setObjectName("serverButton")
+        self.download_server_button.clicked.connect(self.on_download_server_clicked)
+        self.launch_server_button = QPushButton("Launch Server")
+        self.launch_server_button.setObjectName("serverButton")
+        self.launch_server_button.clicked.connect(self.on_launch_server_clicked)
+        server_row.addWidget(self.download_server_button)
+        server_row.addWidget(self.launch_server_button)
+        layout.addLayout(server_row)
+
+        # Server options
+        server_group = QGroupBox("Server options")
+        srv_form = QFormLayout(server_group)
+        srv_form.setLabelAlignment(Qt.AlignLeft)
+        self.server_accept_eula_check = QCheckBox("Auto accept EULA")
+        self.server_gui_check = QCheckBox("Enable server GUI")
+        self.server_restart_check = QCheckBox("Restart if running")
+        self.server_offline_check = QCheckBox("Offline mode (online-mode=false)")
+        self.server_fabric_check = QCheckBox("Fabric server (downloads Fabric launcher)")
+        self.server_forge_check = QCheckBox("Forge server (runs Forge installer --installServer)")
+        self.server_fabric_check.toggled.connect(
+            lambda checked: self.server_forge_check.setChecked(False) if checked else None
+        )
+        self.server_forge_check.toggled.connect(
+            lambda checked: self.server_fabric_check.setChecked(False) if checked else None
+        )
+        srv_form.addRow(self.server_accept_eula_check)
+        srv_form.addRow(self.server_gui_check)
+        srv_form.addRow(self.server_restart_check)
+        srv_form.addRow(self.server_offline_check)
+        srv_form.addRow(self.server_fabric_check)
+        srv_form.addRow(self.server_forge_check)
+        firewall_btn = QPushButton("Open firewall port 25565")
+        firewall_btn.clicked.connect(self._open_firewall_port)
+        srv_form.addRow(firewall_btn)
+        layout.addWidget(server_group)
+
+        # Game Properties
+        gp_group = QGroupBox("Game Properties")
+        gp_form = QFormLayout(gp_group)
+        gp_form.setLabelAlignment(Qt.AlignLeft)
+
+        self.srv_difficulty_combo = QComboBox()
+        self.srv_difficulty_combo.addItems(["peaceful", "easy", "normal", "hard"])
+        self.srv_difficulty_combo.setCurrentText("easy")
+        gp_form.addRow("Difficulty", self.srv_difficulty_combo)
+
+        self.srv_gamemode_combo = QComboBox()
+        self.srv_gamemode_combo.addItems(["survival", "creative", "adventure", "spectator"])
+        gp_form.addRow("Default gamemode", self.srv_gamemode_combo)
+
+        self.srv_max_players_spin = QSpinBox()
+        self.srv_max_players_spin.setRange(1, 1000)
+        self.srv_max_players_spin.setValue(20)
+        gp_form.addRow("Max players", self.srv_max_players_spin)
+
+        self.srv_pvp_check = QCheckBox("PvP")
+        self.srv_pvp_check.setChecked(True)
+        gp_form.addRow(self.srv_pvp_check)
+
+        self.srv_spawn_monsters_check = QCheckBox("Spawn monsters")
+        self.srv_spawn_monsters_check.setChecked(True)
+        gp_form.addRow(self.srv_spawn_monsters_check)
+
+        self.srv_cmd_blocks_check = QCheckBox("Enable command blocks")
+        gp_form.addRow(self.srv_cmd_blocks_check)
+
+        self.srv_cheats_check = QCheckBox("Allow cheats (op yourself)")
+        self.srv_cheats_check.setChecked(True)
+        gp_form.addRow(self.srv_cheats_check)
+
+        apply_props_btn = QPushButton("Apply to server now")
+        apply_props_btn.clicked.connect(self._apply_game_props_now)
+        gp_form.addRow(apply_props_btn)
+
+        layout.addWidget(gp_group)
+
+        gp_hint = QLabel("Gamerules (keepInventory, etc.) can be set in-game with /gamerule.")
+        gp_hint.setWordWrap(True)
+        gp_hint.setStyleSheet("color: #7f8792; font-size: 11px;")
+        layout.addWidget(gp_hint)
+
+        layout.addStretch()
+        scroll.setWidget(content)
+
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
+        return tab
+
+    def _build_settings_tab(self):
+        tab = QWidget()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # Paths
+        paths_group = QGroupBox("Paths")
+        paths_form = QFormLayout(paths_group)
+        paths_form.setLabelAlignment(Qt.AlignLeft)
+
+        self.base_dir_edit, base_browse = self._path_row()
+        base_browse.clicked.connect(lambda: self.browse_path(self.base_dir_edit))
+        self.base_dir_edit.editingFinished.connect(self.refresh_versions)
+        paths_form.addRow("Base dir", self._row_widget(self.base_dir_edit, base_browse))
+
+        self.game_dir_edit, game_browse = self._path_row()
+        game_browse.clicked.connect(lambda: self.browse_path(self.game_dir_edit))
+        paths_form.addRow("Game dir", self._row_widget(self.game_dir_edit, game_browse))
+
+        self.servers_dir_edit, servers_browse = self._path_row()
+        servers_browse.clicked.connect(lambda: self.browse_path(self.servers_dir_edit))
+        paths_form.addRow("Servers dir", self._row_widget(self.servers_dir_edit, servers_browse))
+
+        self.java_edit, java_browse = self._path_row()
+        java_browse.clicked.connect(lambda: self.browse_file(self.java_edit))
+        paths_form.addRow("Java path", self._row_widget(self.java_edit, java_browse))
+
+        layout.addWidget(paths_group)
+
+        # Launch options
+        launch_group = QGroupBox("Launch options")
+        launch_form = QFormLayout(launch_group)
+        launch_form.setLabelAlignment(Qt.AlignLeft)
+
+        self.xmx_edit = QLineEdit()
+        self.xmx_edit.setPlaceholderText("Override (e.g. 4G)")
+        launch_form.addRow("Xmx override", self.xmx_edit)
+
+        self.xms_edit = QLineEdit()
+        self.xms_edit.setPlaceholderText("1G")
+        launch_form.addRow("Xms", self.xms_edit)
+
+        self.xss_edit = QLineEdit()
+        self.xss_edit.setPlaceholderText("1M")
+        launch_form.addRow("Xss", self.xss_edit)
+
+        resolution_row = QWidget()
+        res_layout = QHBoxLayout(resolution_row)
+        res_layout.setContentsMargins(0, 0, 0, 0)
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(0, 10000)
+        self.width_spin.setSpecialValueText("Auto")
+        self.height_spin = QSpinBox()
+        self.height_spin.setRange(0, 10000)
+        self.height_spin.setSpecialValueText("Auto")
+        res_layout.addWidget(self.width_spin)
+        res_layout.addWidget(self.height_spin)
+        launch_form.addRow("Resolution", resolution_row)
+
+        self.demo_check = QCheckBox("Demo mode")
+        self.dry_run_check = QCheckBox("Dry run")
+        self.official_flags_check = QCheckBox("Use official JVM flags")
+        self.official_flags_check.setChecked(True)
+        launch_form.addRow(self.demo_check)
+        launch_form.addRow(self.dry_run_check)
+        launch_form.addRow(self.official_flags_check)
+
+        layout.addWidget(launch_group)
+
+        # Download options
+        download_group = QGroupBox("Download options")
+        dl_form = QFormLayout(download_group)
+        dl_form.setLabelAlignment(Qt.AlignLeft)
+        self.no_assets_check = QCheckBox("Skip assets")
+        self.include_server_check = QCheckBox("Include server.jar")
+        self.include_mappings_check = QCheckBox("Include mappings")
+        self.verify_check = QCheckBox("Verify SHA1 (slow)")
+        self.show_snapshots_check = QCheckBox("Show snapshots in download list")
+        self.show_snapshots_check.toggled.connect(self._populate_version_combo)
+        dl_form.addRow(self.no_assets_check)
+        dl_form.addRow(self.include_server_check)
+        dl_form.addRow(self.include_mappings_check)
+        dl_form.addRow(self.verify_check)
+        dl_form.addRow(self.show_snapshots_check)
+        layout.addWidget(download_group)
+
+        layout.addStretch()
+        scroll.setWidget(content)
+
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
+        return tab
+
     def _path_row(self):
         edit = QLineEdit()
         browse = QToolButton()
@@ -671,91 +943,6 @@ class LauncherWindow(QMainWindow):
         layout.addWidget(button)
         return widget
 
-    def _toggle_dev_settings(self, visible):
-        if visible:
-            self.dev_panel.setMaximumHeight(0)
-            self.dev_panel.setVisible(True)
-            anim = QPropertyAnimation(self.dev_panel, b"maximumHeight")
-            anim.setDuration(250)
-            anim.setStartValue(0)
-            anim.setEndValue(2000)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            anim.start()
-            self._dev_anim = anim  # prevent GC
-        else:
-            anim = QPropertyAnimation(self.dev_panel, b"maximumHeight")
-            anim.setDuration(250)
-            anim.setStartValue(self.dev_panel.height())
-            anim.setEndValue(0)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            anim.finished.connect(lambda: self.dev_panel.setVisible(False))
-            anim.start()
-            self._dev_anim = anim
-
-    def _toggle_logs(self, visible):
-        if visible:
-            self.log_output.setMaximumHeight(0)
-            self.log_output.setVisible(True)
-            anim = QPropertyAnimation(self.log_output, b"maximumHeight")
-            anim.setDuration(250)
-            anim.setStartValue(0)
-            anim.setEndValue(2000)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            anim.start()
-            self._log_anim = anim
-        else:
-            anim = QPropertyAnimation(self.log_output, b"maximumHeight")
-            anim.setDuration(250)
-            anim.setStartValue(self.log_output.height())
-            anim.setEndValue(0)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            anim.finished.connect(lambda: self.log_output.setVisible(False))
-            anim.start()
-            self._log_anim = anim
-
-    def _toggle_mods_panel(self, visible):
-        if visible:
-            self.mods_panel.setMaximumHeight(0)
-            self.mods_panel.setVisible(True)
-            anim = QPropertyAnimation(self.mods_panel, b"maximumHeight")
-            anim.setDuration(250)
-            anim.setStartValue(0)
-            anim.setEndValue(2000)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            anim.start()
-            self._mods_anim = anim
-            self._refresh_mods()
-        else:
-            anim = QPropertyAnimation(self.mods_panel, b"maximumHeight")
-            anim.setDuration(250)
-            anim.setStartValue(self.mods_panel.height())
-            anim.setEndValue(0)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            anim.finished.connect(lambda: self.mods_panel.setVisible(False))
-            anim.start()
-            self._mods_anim = anim
-
-    def _toggle_game_props_panel(self, visible):
-        if visible:
-            self.game_props_panel.setMaximumHeight(0)
-            self.game_props_panel.setVisible(True)
-            anim = QPropertyAnimation(self.game_props_panel, b"maximumHeight")
-            anim.setDuration(250)
-            anim.setStartValue(0)
-            anim.setEndValue(2000)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            anim.start()
-            self._game_props_anim = anim
-        else:
-            anim = QPropertyAnimation(self.game_props_panel, b"maximumHeight")
-            anim.setDuration(250)
-            anim.setStartValue(self.game_props_panel.height())
-            anim.setEndValue(0)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            anim.finished.connect(lambda: self.game_props_panel.setVisible(False))
-            anim.start()
-            self._game_props_anim = anim
-
     def _refresh_mods(self):
         base_dir = self.base_dir_edit.text().strip()
         if not base_dir:
@@ -763,30 +950,52 @@ class LauncherWindow(QMainWindow):
         mods_dir = Path(base_dir) / "mods"
         mods_dir.mkdir(parents=True, exist_ok=True)
 
+        # Determine MC version filter
+        show_all = self.mods_show_all_check.isChecked()
+        mc_version = None
+        if not show_all:
+            version_name = self.installed_combo.currentText()
+            if version_name and version_name != "No versions installed":
+                mc_version = _resolve_mc_version(version_name)
+
         self.mods_list.blockSignals(True)
         self.mods_list.clear()
 
         jars = sorted(mods_dir.glob("*.jar"))
         disabled = sorted(mods_dir.glob("*.jar.disabled"))
 
-        if not jars and not disabled:
-            item = QListWidgetItem("No mods found")
+        def _matches_version(filename):
+            if show_all or not mc_version:
+                return True
+            mod_ver = _extract_mod_mc_version(filename)
+            return mod_ver is None or mod_ver == mc_version
+
+        shown = 0
+        for jar in jars:
+            if not _matches_version(jar.name):
+                continue
+            item = QListWidgetItem(jar.stem)
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setData(Qt.UserRole, str(jar))
+            self.mods_list.addItem(item)
+            shown += 1
+        for jar in disabled:
+            if not _matches_version(jar.name):
+                continue
+            name = jar.name.removesuffix(".jar.disabled")
+            item = QListWidgetItem(name)
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            item.setData(Qt.UserRole, str(jar))
+            self.mods_list.addItem(item)
+            shown += 1
+
+        if shown == 0:
+            msg = "No mods found" if show_all else f"No mods for {mc_version or 'selected version'}"
+            item = QListWidgetItem(msg)
             item.setFlags(Qt.NoItemFlags)
             self.mods_list.addItem(item)
-        else:
-            for jar in jars:
-                item = QListWidgetItem(jar.stem)
-                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Checked)
-                item.setData(Qt.UserRole, str(jar))
-                self.mods_list.addItem(item)
-            for jar in disabled:
-                name = jar.name.removesuffix(".jar.disabled")
-                item = QListWidgetItem(name)
-                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Unchecked)
-                item.setData(Qt.UserRole, str(jar))
-                self.mods_list.addItem(item)
 
         self.mods_list.blockSignals(False)
 
@@ -935,7 +1144,7 @@ class LauncherWindow(QMainWindow):
             return
         reply = QMessageBox.question(
             self, "Update",
-            f"Download and install the update now?\nThe app will restart automatically.",
+            "Download and install the update now?\nThe app will restart automatically.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
@@ -986,6 +1195,223 @@ class LauncherWindow(QMainWindow):
             subprocess.run(["open", str(mods_dir)])
         else:
             subprocess.run(["xdg-open", str(mods_dir)])
+
+    # ── Shaders ───────────────────────────────────────────────
+
+    def _refresh_shaderpacks(self):
+        base_dir = self.base_dir_edit.text().strip()
+        if not base_dir:
+            return
+        sp_dir = Path(base_dir) / "shaderpacks"
+        sp_dir.mkdir(parents=True, exist_ok=True)
+
+        self.shaderpacks_list.blockSignals(True)
+        self.shaderpacks_list.clear()
+
+        zips = sorted(sp_dir.glob("*.zip"))
+        disabled = sorted(sp_dir.glob("*.zip.disabled"))
+
+        if not zips and not disabled:
+            item = QListWidgetItem("No shader packs found")
+            item.setFlags(Qt.NoItemFlags)
+            self.shaderpacks_list.addItem(item)
+        else:
+            for z in zips:
+                item = QListWidgetItem(z.stem)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked)
+                item.setData(Qt.UserRole, str(z))
+                self.shaderpacks_list.addItem(item)
+            for z in disabled:
+                name = z.name.removesuffix(".zip.disabled")
+                item = QListWidgetItem(name)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Unchecked)
+                item.setData(Qt.UserRole, str(z))
+                self.shaderpacks_list.addItem(item)
+
+        self.shaderpacks_list.blockSignals(False)
+
+    def _on_shaderpack_toggled(self, item):
+        file_path = Path(item.data(Qt.UserRole))
+        if not file_path or not file_path.exists():
+            return
+        try:
+            if item.checkState() == Qt.Checked:
+                new_path = file_path.with_name(
+                    file_path.name.removesuffix(".disabled")
+                )
+            else:
+                new_path = file_path.with_name(file_path.name + ".disabled")
+            file_path.rename(new_path)
+            self.shaderpacks_list.blockSignals(True)
+            item.setData(Qt.UserRole, str(new_path))
+            self.shaderpacks_list.blockSignals(False)
+        except OSError as e:
+            self.status_label.setText(f"Failed to toggle shader pack: {e}")
+
+    def _open_shaderpacks_folder(self):
+        base_dir = self.base_dir_edit.text().strip()
+        if not base_dir:
+            return
+        sp_dir = Path(base_dir) / "shaderpacks"
+        sp_dir.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            os.startfile(str(sp_dir))
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(sp_dir)])
+        else:
+            subprocess.run(["xdg-open", str(sp_dir)])
+
+    def _on_install_shader_mod(self):
+        base_dir = self._ensure_base_dir()
+        if not base_dir:
+            return
+        version_name = self.installed_combo.currentText()
+        if not version_name or version_name == "No versions installed":
+            QMessageBox.warning(
+                self, "No version",
+                "Select an installed version first."
+            )
+            return
+
+        loader = _detect_version_loader(version_name)
+        mc_version = _resolve_mc_version(version_name)
+
+        if loader == "vanilla":
+            reply = QMessageBox.question(
+                self, "Shader Mod",
+                "Shaders require a mod loader.\n\n"
+                "Install Fabric + Iris + Sodium automatically?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            # Chain: install Fabric first, then shader mods after it finishes
+            self._pending_shader_install = {
+                "mc_version": mc_version,
+                "base_dir": base_dir,
+                "loader": "fabric",
+            }
+            extra = [version_name, "--base-dir", base_dir]
+            args = self._script_args(self.fabric_installer_path, extra)
+            self.tabs.setCurrentIndex(0)
+            self.start_main_process(args, f"Installing Fabric for {version_name}...")
+            return
+
+        extra = [mc_version, "--base-dir", base_dir, "--loader", loader]
+        args = self._script_args(self.shader_mod_installer_path, extra)
+        self.tabs.setCurrentIndex(0)
+        self.start_main_process(
+            args, f"Installing shader mod ({loader}) for {mc_version}..."
+        )
+
+    def _show_optifine_guide(self):
+        QMessageBox.information(
+            self, "OptiFine Guide",
+            "OptiFine cannot be downloaded automatically.\n\n"
+            "1. Visit https://optifine.net/downloads\n"
+            "2. Download the .jar for your Minecraft version\n"
+            "3. Run the .jar (double click) to install it\n"
+            "4. The OptiFine version will appear in the launcher\n\n"
+            "For Forge: in the installer choose \"Extract\" and\n"
+            "put the .jar in the mods/ folder."
+        )
+
+    def _search_shaderpacks(self):
+        query = self.shader_search_edit.text().strip()
+        if self._shader_searcher is not None and self._shader_searcher.isRunning():
+            return
+
+        mc_version = ""
+        version_name = self.installed_combo.currentText()
+        if version_name and version_name != "No versions installed":
+            mc_version = _resolve_mc_version(version_name)
+
+        self.shader_search_btn.setEnabled(False)
+        self.status_label.setText("Searching shader packs...")
+        self._shader_searcher = ModrinthShaderSearcher(query, mc_version, self)
+        self._shader_searcher.finished.connect(self._on_shader_search_done)
+        self._shader_searcher.start()
+
+    def _on_shader_search_done(self, hits):
+        self.shader_search_btn.setEnabled(True)
+        self.shader_results_list.clear()
+
+        if not hits:
+            item = QListWidgetItem("No results found")
+            item.setFlags(Qt.NoItemFlags)
+            self.shader_results_list.addItem(item)
+            self.status_label.setText("No shader packs found.")
+            return
+
+        for h in hits:
+            downloads = h["downloads"]
+            if downloads >= 1_000_000:
+                dl_str = f"{downloads / 1_000_000:.1f}M"
+            elif downloads >= 1_000:
+                dl_str = f"{downloads / 1_000:.0f}K"
+            else:
+                dl_str = str(downloads)
+
+            item = QListWidgetItem()
+            item.setFlags(Qt.NoItemFlags)
+            self.shader_results_list.addItem(item)
+
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(4, 2, 4, 2)
+            row_layout.setSpacing(8)
+
+            label = QLabel(
+                f"<b>{h['title']}</b> by {h['author']}  "
+                f"<span style='color:#7f8792;'>({dl_str} downloads)</span>"
+            )
+            label.setTextFormat(Qt.RichText)
+            row_layout.addWidget(label, 1)
+
+            btn = QPushButton("Download")
+            slug = h["slug"]
+            btn.clicked.connect(
+                lambda checked, s=slug: self._download_shaderpack(s)
+            )
+            row_layout.addWidget(btn)
+
+            item.setSizeHint(row_widget.sizeHint())
+            self.shader_results_list.setItemWidget(item, row_widget)
+
+        self.status_label.setText(f"Found {len(hits)} shader packs.")
+
+    def _download_shaderpack(self, slug):
+        base_dir = self.base_dir_edit.text().strip()
+        if not base_dir:
+            return
+        if self._shader_downloader is not None and self._shader_downloader.isRunning():
+            self.status_label.setText("A download is already in progress.")
+            return
+
+        sp_dir = Path(base_dir) / "shaderpacks"
+        sp_dir.mkdir(parents=True, exist_ok=True)
+
+        mc_version = ""
+        version_name = self.installed_combo.currentText()
+        if version_name and version_name != "No versions installed":
+            mc_version = _resolve_mc_version(version_name)
+
+        self.status_label.setText(f"Downloading shader pack: {slug}...")
+        self._shader_downloader = ShaderPackDownloader(
+            slug, mc_version, str(sp_dir), self
+        )
+        self._shader_downloader.finished.connect(self._on_shaderpack_downloaded)
+        self._shader_downloader.start()
+
+    def _on_shaderpack_downloaded(self, success, message):
+        if success:
+            self.status_label.setText(message)
+            self._refresh_shaderpacks()
+        else:
+            self.status_label.setText(f"Download failed: {message}")
 
     # ── Username validation ───────────────────────────────────
 
@@ -1096,6 +1522,7 @@ class LauncherWindow(QMainWindow):
         self.server_restart_check.setChecked(settings.get("server_restart", True))
         self.server_offline_check.setChecked(settings.get("server_offline_mode", True))
         self.server_fabric_check.setChecked(settings.get("server_fabric", False))
+        self.server_forge_check.setChecked(settings.get("server_forge", False))
         idx = self.srv_difficulty_combo.findText(settings.get("srv_difficulty", "easy"))
         if idx >= 0:
             self.srv_difficulty_combo.setCurrentIndex(idx)
@@ -1139,6 +1566,7 @@ class LauncherWindow(QMainWindow):
             "server_restart": self.server_restart_check.isChecked(),
             "server_offline_mode": self.server_offline_check.isChecked(),
             "server_fabric": self.server_fabric_check.isChecked(),
+            "server_forge": self.server_forge_check.isChecked(),
             "srv_difficulty": self.srv_difficulty_combo.currentText(),
             "srv_gamemode": self.srv_gamemode_combo.currentText(),
             "srv_max_players": self.srv_max_players_spin.value(),
@@ -1264,7 +1692,7 @@ class LauncherWindow(QMainWindow):
         args = self._script_args(self.downloader_path, extra)
 
         # Auto-show logs during download
-        self.log_toggle.setChecked(True)
+        self.tabs.setCurrentIndex(0)
         self.start_main_process(args, f"Downloading {version_id}...")
 
     def on_launch_clicked(self):
@@ -1333,8 +1761,21 @@ class LauncherWindow(QMainWindow):
             return
         extra = [version_id, "--base-dir", base_dir]
         args = self._script_args(self.fabric_installer_path, extra)
-        self.log_toggle.setChecked(True)
+        self.tabs.setCurrentIndex(0)
         self.start_main_process(args, f"Installing Fabric for {version_id}...")
+
+    def on_install_forge_clicked(self):
+        base_dir = self._ensure_base_dir()
+        if not base_dir:
+            return
+        version_id = self.version_combo.currentText()
+        if not version_id or version_id == "Loading...":
+            QMessageBox.warning(self, "No version", "Select a version to install Forge for.")
+            return
+        extra = [version_id, "--base-dir", base_dir]
+        args = self._script_args(self.forge_installer_path, extra)
+        self.tabs.setCurrentIndex(0)
+        self.start_main_process(args, f"Installing Forge for {version_id}...")
 
     def on_download_server_clicked(self):
         if not self._ensure_scripts():
@@ -1349,11 +1790,15 @@ class LauncherWindow(QMainWindow):
             QMessageBox.warning(self, "No version", "Wait for versions to load or select one.")
             return
 
-        self.log_toggle.setChecked(True)
+        self.tabs.setCurrentIndex(0)
         if self.server_fabric_check.isChecked():
             extra = [version_id, "--servers-dir", servers_dir, "--server"]
             args = self._script_args(self.fabric_installer_path, extra)
             self.start_main_process(args, f"Downloading Fabric server {version_id}...")
+        elif self.server_forge_check.isChecked():
+            extra = [version_id, "--servers-dir", servers_dir, "--server"]
+            args = self._script_args(self.forge_installer_path, extra)
+            self.start_main_process(args, f"Installing Forge server {version_id}...")
         else:
             extra = [version_id, "--servers-dir", servers_dir]
             if self.verify_check.isChecked():
@@ -1440,6 +1885,8 @@ class LauncherWindow(QMainWindow):
         for widget in (
             self.download_button,
             self.install_fabric_button,
+            self.install_forge_button,
+            self.install_shader_mod_btn,
             self.launch_button,
             self.download_server_button,
         ):
@@ -1484,6 +1931,21 @@ class LauncherWindow(QMainWindow):
         self._set_main_busy(False)
         self._set_server_busy(self.server_process.state() != QProcess.NotRunning)
         self.refresh_versions()
+
+        # Chain: auto-install shader mods after Fabric install
+        pending = getattr(self, "_pending_shader_install", None)
+        if pending and exit_code == 0:
+            self._pending_shader_install = None
+            mc_ver = pending["mc_version"]
+            base_dir = pending["base_dir"]
+            loader = pending["loader"]
+            extra = [mc_ver, "--base-dir", base_dir, "--loader", loader]
+            args = self._script_args(self.shader_mod_installer_path, extra)
+            self.start_main_process(
+                args, f"Installing Iris + Sodium for {mc_ver}..."
+            )
+        elif pending:
+            self._pending_shader_install = None
 
     def on_server_process_finished(self, exit_code, _status):
         self.status_label.setText(f"Server stopped (code {exit_code}).")

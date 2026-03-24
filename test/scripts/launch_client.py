@@ -48,6 +48,18 @@ def parse_maven_name(name):
     return classifier
 
 
+def maven_to_path(name):
+    """Convert a Maven coordinate (group:artifact:version[:classifier]) to a relative jar path."""
+    parts = name.split(":")
+    if len(parts) < 3:
+        return None
+    group, artifact, version = parts[0], parts[1], parts[2]
+    classifier = parts[3] if len(parts) > 3 else None
+    group_path = group.replace(".", "/")
+    jar_name = f"{artifact}-{version}" + (f"-{classifier}" if classifier else "") + ".jar"
+    return f"{group_path}/{artifact}/{version}/{jar_name}"
+
+
 def native_classifier_matches(classifier, os_name, os_arch):
     if os_name == "windows":
         if classifier == "natives-windows":       return os_arch == "x64"
@@ -123,12 +135,21 @@ def jvm_args_contain(items, needle):
     return False
 
 
+def _lib_artifact_key(lib):
+    """Extract group:artifact from a library name for deduplication."""
+    name = lib.get("name", "")
+    parts = name.split(":")
+    if len(parts) >= 2:
+        return f"{parts[0]}:{parts[1]}"
+    return name
+
+
 def load_merged_version(versions_dir, version_id):
     """Load a version JSON, recursively merging with parent if inheritsFrom is set.
 
     Fabric version JSONs declare inheritsFrom pointing at the vanilla version.
     The merge rules follow the official launcher spec:
-    - libraries: parent list + child list
+    - libraries: parent list + child list (child wins on duplicate group:artifact)
     - arguments.game/jvm: parent list + child list
     - all other keys: child value takes precedence; parent value used as fallback
     """
@@ -143,7 +164,13 @@ def load_merged_version(versions_dir, version_id):
         if key == "inheritsFrom":
             continue
         if key == "libraries":
-            merged["libraries"] = parent.get("libraries", []) + val
+            # Child libraries override parent libraries with same group:artifact
+            child_keys = {_lib_artifact_key(lib) for lib in val}
+            deduped_parent = [
+                lib for lib in parent.get("libraries", [])
+                if _lib_artifact_key(lib) not in child_keys
+            ]
+            merged["libraries"] = deduped_parent + val
         elif key == "arguments":
             merged_args = {}
             for akey in ("game", "jvm"):
@@ -235,6 +262,7 @@ def main():
     if not version_json_path.exists():
         print(f"missing version json: {version_json_path}", file=sys.stderr)
         return 1
+    raw_version = read_json(version_json_path)
     version_data = load_merged_version(base_dir / "versions", version_id)
 
     os_name = current_os_name()
@@ -272,6 +300,15 @@ def main():
                 missing.append(lib_path)
             else:
                 classpath_entries.append(lib_path)
+        elif not artifact and lib.get("name"):
+            # Fallback for libraries without downloads (e.g. Fabric/Iris profiles)
+            rel_path = maven_to_path(lib["name"])
+            if rel_path:
+                lib_path = libs_dir / rel_path
+                if lib_path.exists():
+                    classpath_entries.append(lib_path)
+                else:
+                    missing.append(lib_path)
 
         if classifier and classifier.startswith("natives-") and artifact:
             if native_classifier_matches(classifier, os_name, os_arch):
@@ -302,7 +339,17 @@ def main():
                         native_hash_entries.append(native_info["path"])
 
     version_jar = version_dir / f"{version_id}.jar"
-    if not version_jar.exists():
+    # For inheritsFrom versions (Fabric, Iris, etc.) the jar may be missing or
+    # empty (0 bytes).  Copy it from the parent vanilla version automatically.
+    parent_id = raw_version.get("inheritsFrom")
+    if parent_id and (not version_jar.exists() or version_jar.stat().st_size == 0):
+        parent_jar = base_dir / "versions" / parent_id / f"{parent_id}.jar"
+        if parent_jar.exists() and parent_jar.stat().st_size > 0:
+            print(f"Copying client jar from {parent_id}...")
+            shutil.copy2(str(parent_jar), str(version_jar))
+        else:
+            missing.append(version_jar)
+    elif not version_jar.exists():
         missing.append(version_jar)
 
     if missing:
@@ -395,6 +442,9 @@ def main():
         "classpath": classpath,
         "natives_directory": str(natives_dir),
         "user_properties": "{}",
+        # Forge-specific variables
+        "library_directory": str(libs_dir),
+        "classpath_separator": os.pathsep,
     }
 
     jvm_args = resolve_arguments(
@@ -403,6 +453,14 @@ def main():
     game_args = resolve_arguments(
         args_data.get("game", []), replacements, os_name, os_arch, os_version, features
     )
+
+    # Override custom mods folder (e.g. Iris installer sets -Dfabric.modsFolder
+    # to iris-reserved/) so that mods from the standard mods/ folder are loaded.
+    standard_mods = str(game_dir / "mods")
+    jvm_args = [
+        f"-Dfabric.modsFolder={standard_mods}" if a.startswith("-Dfabric.modsFolder=") else a
+        for a in jvm_args
+    ]
 
     if args.official_jvm_flags:
         if not any(arg.startswith("-Xss") for arg in jvm_args):
