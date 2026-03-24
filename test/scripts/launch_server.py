@@ -142,6 +142,11 @@ def main():
         action="store_true",
         help="Set online-mode=false in server.properties (allows offline/cracked clients)",
     )
+    parser.add_argument(
+        "--instance",
+        default=None,
+        help="Server instance name (subfolder within version dir for multi-world support)",
+    )
     args = parser.parse_args()
 
     servers_dir = Path(args.servers_dir)
@@ -152,6 +157,8 @@ def main():
     version_id = args.version_id
     mc_version_id = re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
     server_dir = servers_dir / mc_version_id
+    if args.instance:
+        server_dir = server_dir / args.instance
     if mc_version_id != version_id:
         print(f"Fabric version detected — using server dir for {mc_version_id}")
 

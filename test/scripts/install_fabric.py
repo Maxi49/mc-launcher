@@ -151,8 +151,10 @@ def install_client(mc_version, base_dir, loader_version):
     return 0
 
 
-def install_server(mc_version, servers_dir, loader_version, installer_version):
+def install_server(mc_version, servers_dir, loader_version, installer_version, instance=None):
     server_dir = Path(servers_dir) / mc_version
+    if instance:
+        server_dir = server_dir / instance
     server_dir.mkdir(parents=True, exist_ok=True)
 
     url = (
@@ -178,6 +180,7 @@ def main():
     parser.add_argument("--loader-version", default=None, help="Fabric loader version (default: latest)")
     parser.add_argument("--installer-version", default=None, help="Fabric installer version (default: latest)")
     parser.add_argument("--server", action="store_true", help="Install Fabric server launcher")
+    parser.add_argument("--instance", default=None, help="Server instance name (multi-world support)")
     args = parser.parse_args()
 
     print(f"Fetching latest Fabric loader for {args.mc_version}...")
@@ -190,7 +193,7 @@ def main():
             return 1
         installer = args.installer_version or _latest_installer()
         print(f"Installer: {installer}")
-        return install_server(args.mc_version, args.servers_dir, loader, installer)
+        return install_server(args.mc_version, args.servers_dir, loader, installer, args.instance)
     else:
         if not args.base_dir:
             print("--base-dir is required for client install", file=sys.stderr)

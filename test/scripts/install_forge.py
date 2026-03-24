@@ -162,9 +162,11 @@ def install_client(mc_version, base_dir, forge_version):
     return 0
 
 
-def install_server(mc_version, servers_dir, forge_version):
+def install_server(mc_version, servers_dir, forge_version, instance=None):
     """Install Forge server using --installServer (headless)."""
     server_dir = Path(servers_dir) / mc_version
+    if instance:
+        server_dir = server_dir / instance
     server_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Resolve forge version
@@ -229,13 +231,14 @@ def main():
     parser.add_argument("--servers-dir", default=None, help="Path to servers dir (server install)")
     parser.add_argument("--forge-version", default=None, help="Forge version (default: recommended or latest)")
     parser.add_argument("--server", action="store_true", help="Install Forge server (headless)")
+    parser.add_argument("--instance", default=None, help="Server instance name (multi-world support)")
     args = parser.parse_args()
 
     if args.server:
         if not args.servers_dir:
             print("--servers-dir is required for server install", file=sys.stderr)
             return 1
-        return install_server(args.mc_version, args.servers_dir, args.forge_version)
+        return install_server(args.mc_version, args.servers_dir, args.forge_version, args.instance)
     else:
         if not args.base_dir:
             print("--base-dir is required for client install", file=sys.stderr)

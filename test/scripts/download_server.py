@@ -38,6 +38,11 @@ def main():
         action="store_true",
         help="Download server mappings if available",
     )
+    parser.add_argument(
+        "--instance",
+        default=None,
+        help="Server instance name (subfolder within version dir for multi-world support)",
+    )
     args = parser.parse_args()
 
     session = requests.Session()
@@ -62,6 +67,8 @@ def main():
         return 1
 
     server_dir = Path(args.servers_dir) / version_id
+    if args.instance:
+        server_dir = server_dir / args.instance
     server_dir.mkdir(parents=True, exist_ok=True)
 
     version_json_path = server_dir / f"{version_id}.json"

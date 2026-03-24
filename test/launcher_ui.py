@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -367,11 +368,7 @@ class LauncherWindow(QMainWindow):
         self.main_process.readyReadStandardError.connect(self.on_main_process_output)
         self.main_process.finished.connect(self.on_main_process_finished)
 
-        self.server_process = QProcess(self)
-        self.server_process.setProcessChannelMode(QProcess.MergedChannels)
-        self.server_process.readyReadStandardOutput.connect(self.on_server_process_output)
-        self.server_process.readyReadStandardError.connect(self.on_server_process_output)
-        self.server_process.finished.connect(self.on_server_process_finished)
+        self.server_processes = {}  # {instance_key: QProcess}
 
         self._build_ui()
         self._load_settings()
@@ -736,6 +733,26 @@ class LauncherWindow(QMainWindow):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
+        # Instance selection
+        instance_row = QHBoxLayout()
+        instance_row.addWidget(QLabel("World:"))
+        self.server_instance_combo = QComboBox()
+        self.server_instance_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.server_instance_combo.currentTextChanged.connect(self._on_instance_changed)
+        instance_row.addWidget(self.server_instance_combo, 1)
+        self.new_instance_button = QPushButton("New World")
+        self.new_instance_button.clicked.connect(self._on_new_instance)
+        instance_row.addWidget(self.new_instance_button)
+        self.delete_instance_button = QPushButton("Delete")
+        self.delete_instance_button.clicked.connect(self._on_delete_instance)
+        instance_row.addWidget(self.delete_instance_button)
+        layout.addLayout(instance_row)
+
+        # Running status
+        self.server_running_label = QLabel("No servers running")
+        self.server_running_label.setStyleSheet("color: #7f8792;")
+        layout.addWidget(self.server_running_label)
+
         # Server buttons
         server_row = QHBoxLayout()
         self.download_server_button = QPushButton("Download Server")
@@ -770,15 +787,21 @@ class LauncherWindow(QMainWindow):
         srv_form.addRow(self.server_offline_check)
         srv_form.addRow(self.server_fabric_check)
         srv_form.addRow(self.server_forge_check)
-        firewall_btn = QPushButton("Open firewall port 25565")
-        firewall_btn.clicked.connect(self._open_firewall_port)
-        srv_form.addRow(firewall_btn)
+        self.firewall_btn = QPushButton("Open firewall port 25565")
+        self.firewall_btn.clicked.connect(self._open_firewall_port)
+        srv_form.addRow(self.firewall_btn)
         layout.addWidget(server_group)
 
         # Game Properties
         gp_group = QGroupBox("Game Properties")
         gp_form = QFormLayout(gp_group)
         gp_form.setLabelAlignment(Qt.AlignLeft)
+
+        self.srv_port_spin = QSpinBox()
+        self.srv_port_spin.setRange(1024, 65535)
+        self.srv_port_spin.setValue(25565)
+        self.srv_port_spin.valueChanged.connect(self._on_port_changed)
+        gp_form.addRow("Port", self.srv_port_spin)
 
         self.srv_difficulty_combo = QComboBox()
         self.srv_difficulty_combo.addItems(["peaceful", "easy", "normal", "hard"])
@@ -826,6 +849,10 @@ class LauncherWindow(QMainWindow):
         tab_layout = QVBoxLayout(tab)
         tab_layout.setContentsMargins(0, 0, 0, 0)
         tab_layout.addWidget(scroll)
+
+        # Refresh instances when version changes
+        self.installed_combo.currentTextChanged.connect(self._refresh_server_instances)
+
         return tab
 
     def _build_settings_tab(self):
@@ -1015,17 +1042,210 @@ class LauncherWindow(QMainWindow):
         except OSError as e:
             self.status_label.setText(f"Failed to toggle mod: {e}")
 
+    # ── Server instances ────────────────────────────────────────
+
+    def _resolve_server_dir(self, servers_dir, version_id):
+        """Return the server directory, accounting for instance selection."""
+        import re
+        mc_version = re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+        server_dir = Path(servers_dir) / mc_version
+        instance = self.server_instance_combo.currentText()
+        if instance and instance != "(default)":
+            server_dir = server_dir / instance
+        return server_dir
+
+    def _list_server_instances(self, version_id):
+        """Return list of instance names for the given version."""
+        import re
+        base_dir = self.base_dir_edit.text().strip()
+        if not base_dir:
+            return []
+        servers_dir = self._resolve_servers_dir(base_dir)
+        mc_version = re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+        version_dir = Path(servers_dir) / mc_version
+        if not version_dir.exists():
+            return []
+        # Check for old flat layout (server jar directly in version dir)
+        jar_names = ["server.jar", "fabric-server-launch.jar"]
+        if sys.platform == "win32":
+            jar_names.append("run.bat")
+        else:
+            jar_names.append("run.sh")
+        has_flat_jar = any((version_dir / j).exists() for j in jar_names)
+        # List subdirectories that have a server jar
+        instances = []
+        for entry in sorted(version_dir.iterdir()):
+            if entry.is_dir() and any((entry / j).exists() for j in jar_names):
+                instances.append(entry.name)
+        if not instances and has_flat_jar:
+            return ["(default)"]
+        return instances
+
+    def _refresh_server_instances(self):
+        version_id = self.installed_combo.currentText()
+        if not version_id or version_id == "No versions installed":
+            self.server_instance_combo.clear()
+            return
+        previous = self.server_instance_combo.currentText()
+        instances = self._list_server_instances(version_id)
+        self.server_instance_combo.blockSignals(True)
+        self.server_instance_combo.clear()
+        if instances:
+            self.server_instance_combo.addItems(instances)
+            idx = self.server_instance_combo.findText(previous)
+            if idx >= 0:
+                self.server_instance_combo.setCurrentIndex(idx)
+        self.server_instance_combo.blockSignals(False)
+        self._on_instance_changed(self.server_instance_combo.currentText())
+
+    def _on_instance_changed(self, instance_name):
+        """Load server.properties from the selected instance."""
+        self._update_server_running_label()
+        if not instance_name:
+            return
+        base_dir = self.base_dir_edit.text().strip()
+        if not base_dir:
+            return
+        version_id = self.installed_combo.currentText()
+        if not version_id or version_id == "No versions installed":
+            return
+        servers_dir = self._resolve_servers_dir(base_dir)
+        server_dir = self._resolve_server_dir(servers_dir, version_id)
+        self._load_server_properties(server_dir)
+
+    def _load_server_properties(self, server_dir):
+        """Read server.properties and populate UI widgets."""
+        props_path = Path(server_dir) / "server.properties"
+        if not props_path.exists():
+            return
+        props = {}
+        try:
+            for line in props_path.read_text(encoding="utf-8").splitlines():
+                if "=" in line and not line.startswith("#"):
+                    key, val = line.split("=", 1)
+                    props[key.strip()] = val.strip()
+        except OSError:
+            return
+        if "server-port" in props:
+            try:
+                self.srv_port_spin.setValue(int(props["server-port"]))
+            except ValueError:
+                pass
+        if "difficulty" in props:
+            idx = self.srv_difficulty_combo.findText(props["difficulty"])
+            if idx >= 0:
+                self.srv_difficulty_combo.setCurrentIndex(idx)
+        if "gamemode" in props:
+            idx = self.srv_gamemode_combo.findText(props["gamemode"])
+            if idx >= 0:
+                self.srv_gamemode_combo.setCurrentIndex(idx)
+        if "max-players" in props:
+            try:
+                self.srv_max_players_spin.setValue(int(props["max-players"]))
+            except ValueError:
+                pass
+        if "pvp" in props:
+            self.srv_pvp_check.setChecked(props["pvp"] == "true")
+        if "spawn-monsters" in props:
+            self.srv_spawn_monsters_check.setChecked(props["spawn-monsters"] == "true")
+        if "enable-command-block" in props:
+            self.srv_cmd_blocks_check.setChecked(props["enable-command-block"] == "true")
+
+    def _on_new_instance(self):
+        import re as _re
+        import shutil
+        base_dir = self.base_dir_edit.text().strip()
+        if not base_dir:
+            return
+        version_id = self.installed_combo.currentText()
+        if not version_id or version_id == "No versions installed":
+            QMessageBox.warning(self, "No version", "Select an installed version first.")
+            return
+        name, ok = QInputDialog.getText(self, "New World", "World name:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if not _re.match(r'^[\w\-. ]+$', name):
+            QMessageBox.warning(self, "Invalid name", "Use only letters, numbers, spaces, dashes, and dots.")
+            return
+        servers_dir = self._resolve_servers_dir(base_dir)
+        mc_version = _re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+        version_dir = Path(servers_dir) / mc_version
+        instance_dir = version_dir / name
+        if instance_dir.exists():
+            QMessageBox.warning(self, "Exists", f"World '{name}' already exists.")
+            return
+        instance_dir.mkdir(parents=True, exist_ok=True)
+        # Copy server jars from version dir if they exist
+        for jar_name in ["server.jar", "fabric-server-launch.jar"]:
+            src = version_dir / jar_name
+            if src.exists():
+                shutil.copy2(str(src), str(instance_dir / jar_name))
+        # Copy run.bat/run.sh for Forge
+        for script_name in ["run.bat", "run.sh"]:
+            src = version_dir / script_name
+            if src.exists():
+                shutil.copy2(str(src), str(instance_dir / script_name))
+        # Copy version JSON if it exists
+        for json_file in version_dir.glob("*.json"):
+            if json_file.name != "server.properties":
+                dest = instance_dir / json_file.name
+                if not dest.exists():
+                    shutil.copy2(str(json_file), str(dest))
+        self._refresh_server_instances()
+        idx = self.server_instance_combo.findText(name)
+        if idx >= 0:
+            self.server_instance_combo.setCurrentIndex(idx)
+        self.status_label.setText(f"Created world '{name}'.")
+
+    def _on_delete_instance(self):
+        import shutil
+        instance = self.server_instance_combo.currentText()
+        if not instance or instance == "(default)":
+            QMessageBox.warning(self, "Cannot delete", "Cannot delete the default server. Delete the folder manually.")
+            return
+        # Check if running
+        version_id = self.installed_combo.currentText()
+        if version_id:
+            import re as _re
+            mc_version = _re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+            instance_key = f"{mc_version}/{instance}"
+            if instance_key in self.server_processes and self.server_processes[instance_key].state() != QProcess.NotRunning:
+                QMessageBox.warning(self, "Server running", "Stop the server before deleting.")
+                return
+        reply = QMessageBox.warning(
+            self, "Delete World",
+            f"Delete world '{instance}' and all its data?\nThis cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        base_dir = self.base_dir_edit.text().strip()
+        servers_dir = self._resolve_servers_dir(base_dir)
+        import re as _re
+        mc_version = _re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+        instance_dir = Path(servers_dir) / mc_version / instance
+        if instance_dir.exists():
+            shutil.rmtree(str(instance_dir), ignore_errors=True)
+        self._refresh_server_instances()
+        self.status_label.setText(f"Deleted world '{instance}'.")
+
+    def _on_port_changed(self, value):
+        self.firewall_btn.setText(f"Open firewall port {value}")
+
     def _open_firewall_port(self):
+        port = self.srv_port_spin.value()
         if sys.platform == "win32":
             import ctypes
             result = ctypes.windll.shell32.ShellExecuteW(
                 None, "runas", "netsh",
-                "advfirewall firewall add rule name=\"Minecraft Server\" "
-                "dir=in action=allow protocol=TCP localport=25565",
+                f"advfirewall firewall add rule name=\"Minecraft Server {port}\" "
+                f"dir=in action=allow protocol=TCP localport={port}",
                 None, 1,
             )
             if result > 32:
-                QMessageBox.information(self, "Firewall", "Firewall rule added (port 25565 TCP).")
+                QMessageBox.information(self, "Firewall", f"Firewall rule added (port {port} TCP).")
             else:
                 QMessageBox.warning(self, "Firewall", "Could not add firewall rule. Try running as administrator.")
         elif sys.platform == "darwin":
@@ -1037,8 +1257,8 @@ class LauncherWindow(QMainWindow):
         else:
             QMessageBox.information(
                 self, "Firewall",
-                "Run this command in a terminal:\n\n"
-                "sudo ufw allow 25565/tcp"
+                f"Run this command in a terminal:\n\n"
+                f"sudo ufw allow {port}/tcp"
             )
 
     # ── Game properties ───────────────────────────────────────
@@ -1049,6 +1269,7 @@ class LauncherWindow(QMainWindow):
         server_dir.mkdir(parents=True, exist_ok=True)
         props_path = server_dir / "server.properties"
         updates = {
+            "server-port": str(self.srv_port_spin.value()),
             "difficulty": self.srv_difficulty_combo.currentText(),
             "gamemode": self.srv_gamemode_combo.currentText(),
             "max-players": str(self.srv_max_players_spin.value()),
@@ -1114,9 +1335,10 @@ class LauncherWindow(QMainWindow):
         if not version_id or version_id == "Loading...":
             QMessageBox.warning(self, "No version", "Select a version first.")
             return
-        server_dir = Path(servers_dir) / version_id
+        server_dir = self._resolve_server_dir(servers_dir, version_id)
         self._write_server_properties(server_dir)
-        self.status_label.setText(f"server.properties updated for {version_id}.")
+        instance = self.server_instance_combo.currentText() or version_id
+        self.status_label.setText(f"server.properties updated for {instance}.")
 
     # ── Auto-update ───────────────────────────────────────────
 
@@ -1534,11 +1756,13 @@ class LauncherWindow(QMainWindow):
         self.srv_spawn_monsters_check.setChecked(settings.get("srv_spawn_monsters", True))
         self.srv_cmd_blocks_check.setChecked(settings.get("srv_cmd_blocks", False))
         self.srv_cheats_check.setChecked(settings.get("srv_cheats", True))
+        self.srv_port_spin.setValue(settings.get("srv_port", 25565))
         if not self.servers_dir_edit.text().strip():
             self.servers_dir_edit.setText(
                 str(Path(self.base_dir_edit.text().strip() or default_base_dir()) / "servers")
             )
         self._pending_selected_version = settings.get("selected_version", "")
+        self._pending_server_instance = settings.get("selected_server_instance", "")
 
     def _save_settings(self):
         settings = {
@@ -1574,7 +1798,9 @@ class LauncherWindow(QMainWindow):
             "srv_spawn_monsters": self.srv_spawn_monsters_check.isChecked(),
             "srv_cmd_blocks": self.srv_cmd_blocks_check.isChecked(),
             "srv_cheats": self.srv_cheats_check.isChecked(),
+            "srv_port": self.srv_port_spin.value(),
             "selected_version": self.installed_combo.currentText(),
+            "selected_server_instance": self.server_instance_combo.currentText(),
         }
         save_settings(settings)
 
@@ -1583,6 +1809,10 @@ class LauncherWindow(QMainWindow):
         if self.manifest_fetcher is not None and self.manifest_fetcher.isRunning():
             self.manifest_fetcher.quit()
             self.manifest_fetcher.wait(3000)
+        for key, proc in list(self.server_processes.items()):
+            if proc.state() != QProcess.NotRunning:
+                proc.terminate()
+                proc.waitForFinished(3000)
         super().closeEvent(event)
 
     # ── Browse helpers ─────────────────────────────────────────
@@ -1623,6 +1853,13 @@ class LauncherWindow(QMainWindow):
             return
         self.installed_combo.setEnabled(True)
         self._pending_selected_version = ""
+        # Restore pending server instance
+        pending_instance = getattr(self, "_pending_server_instance", "")
+        if pending_instance:
+            self._pending_server_instance = ""
+            idx = self.server_instance_combo.findText(pending_instance)
+            if idx >= 0:
+                self.server_instance_combo.setCurrentIndex(idx)
 
     # ── Script helpers ─────────────────────────────────────────
 
@@ -1777,6 +2014,20 @@ class LauncherWindow(QMainWindow):
         self.tabs.setCurrentIndex(0)
         self.start_main_process(args, f"Installing Forge for {version_id}...")
 
+    def _get_instance_args(self):
+        """Return --instance args if a non-default instance is selected."""
+        instance = self.server_instance_combo.currentText()
+        if instance and instance != "(default)":
+            return ["--instance", instance]
+        return []
+
+    def _get_instance_key(self, version_id):
+        """Return instance key for process tracking."""
+        import re
+        mc_version = re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+        instance = self.server_instance_combo.currentText() or "(default)"
+        return f"{mc_version}/{instance}"
+
     def on_download_server_clicked(self):
         if not self._ensure_scripts():
             return
@@ -1784,6 +2035,7 @@ class LauncherWindow(QMainWindow):
         if not base_dir:
             return
         servers_dir = self._resolve_servers_dir(base_dir)
+        instance_args = self._get_instance_args()
 
         version_id = self.version_combo.currentText()
         if not version_id or version_id == "Loading...":
@@ -1792,15 +2044,15 @@ class LauncherWindow(QMainWindow):
 
         self.tabs.setCurrentIndex(0)
         if self.server_fabric_check.isChecked():
-            extra = [version_id, "--servers-dir", servers_dir, "--server"]
+            extra = [version_id, "--servers-dir", servers_dir, "--server"] + instance_args
             args = self._script_args(self.fabric_installer_path, extra)
             self.start_main_process(args, f"Downloading Fabric server {version_id}...")
         elif self.server_forge_check.isChecked():
-            extra = [version_id, "--servers-dir", servers_dir, "--server"]
+            extra = [version_id, "--servers-dir", servers_dir, "--server"] + instance_args
             args = self._script_args(self.forge_installer_path, extra)
             self.start_main_process(args, f"Installing Forge server {version_id}...")
         else:
-            extra = [version_id, "--servers-dir", servers_dir]
+            extra = [version_id, "--servers-dir", servers_dir] + instance_args
             if self.verify_check.isChecked():
                 extra.append("--verify")
             if self.include_mappings_check.isChecked():
@@ -1822,10 +2074,21 @@ class LauncherWindow(QMainWindow):
             QMessageBox.warning(self, "No version", "Select a version.")
             return
 
-        # Apply game properties to server.properties before launch
-        self._write_server_properties(Path(servers_dir) / version_id)
+        instance_key = self._get_instance_key(version_id)
 
-        extra = [version_id, "--servers-dir", servers_dir, "--minecraft-dir", base_dir]
+        # If this instance is already running, offer to stop it
+        if instance_key in self.server_processes and self.server_processes[instance_key].state() != QProcess.NotRunning:
+            self.server_processes[instance_key].terminate()
+            self.status_label.setText(f"Stopping server {instance_key}...")
+            self._update_server_running_label()
+            return
+
+        # Apply game properties to server.properties before launch
+        server_dir = self._resolve_server_dir(servers_dir, version_id)
+        self._write_server_properties(server_dir)
+
+        instance_args = self._get_instance_args()
+        extra = [version_id, "--servers-dir", servers_dir, "--minecraft-dir", base_dir] + instance_args
         java_path = self.java_edit.text().strip()
         if java_path:
             extra += ["--java", java_path]
@@ -1845,7 +2108,7 @@ class LauncherWindow(QMainWindow):
             extra.append("--dry-run")
         args = self._script_args(self.server_launcher_path, extra)
 
-        self.start_server_process(args, f"Launching server {version_id}...")
+        self.start_server_process(args, f"Launching server {instance_key}...", instance_key)
 
     # ── Process management ─────────────────────────────────────
 
@@ -1865,21 +2128,37 @@ class LauncherWindow(QMainWindow):
         self.main_process.setWorkingDirectory(str(self.script_dir))
         self.main_process.start(args[0], [str(a) for a in args[1:]])
 
-    def start_server_process(self, args, label):
-        if self.server_process.state() != QProcess.NotRunning:
-            QMessageBox.warning(self, "Server running", "Server process is already running.")
-            return
+    def start_server_process(self, args, label, instance_key):
+        if instance_key in self.server_processes:
+            proc = self.server_processes[instance_key]
+            if proc.state() != QProcess.NotRunning:
+                QMessageBox.warning(self, "Server running",
+                    f"Server '{instance_key}' is already running.")
+                return
 
         self._save_settings()
         self.log_output.appendPlainText(f"$ {format_cmd([str(a) for a in args])}")
         self.status_label.setText(label)
-        self._set_server_busy(True)
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(
+            lambda key=instance_key: self._on_server_output(key)
+        )
+        proc.readyReadStandardError.connect(
+            lambda key=instance_key: self._on_server_output(key)
+        )
+        proc.finished.connect(
+            lambda code, status, key=instance_key: self._on_server_finished(key, code)
+        )
+        self.server_processes[instance_key] = proc
 
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONUNBUFFERED", "1")
-        self.server_process.setProcessEnvironment(env)
-        self.server_process.setWorkingDirectory(str(self.script_dir))
-        self.server_process.start(args[0], [str(a) for a in args[1:]])
+        proc.setProcessEnvironment(env)
+        proc.setWorkingDirectory(str(self.script_dir))
+        proc.start(args[0], [str(a) for a in args[1:]])
+        self._update_server_running_label()
 
     def _set_main_busy(self, busy):
         for widget in (
@@ -1891,8 +2170,6 @@ class LauncherWindow(QMainWindow):
             self.download_server_button,
         ):
             widget.setEnabled(not busy)
-        if self.server_process.state() == QProcess.NotRunning:
-            self.launch_server_button.setEnabled(not busy)
         # Fade-in the PLAY button when it becomes enabled
         if not busy:
             self._play_opacity.setOpacity(0.0)
@@ -1904,10 +2181,23 @@ class LauncherWindow(QMainWindow):
             anim.start()
             self._play_fade_anim = anim
 
-    def _set_server_busy(self, busy):
-        self.launch_server_button.setEnabled(
-            (not busy) and self.main_process.state() == QProcess.NotRunning
-        )
+    def _update_server_running_label(self):
+        running = [k for k, p in self.server_processes.items()
+                   if p.state() != QProcess.NotRunning]
+        if running:
+            self.server_running_label.setText(f"Running: {', '.join(running)}")
+            self.server_running_label.setStyleSheet("color: #3fb950; font-weight: 600;")
+        else:
+            self.server_running_label.setText("No servers running")
+            self.server_running_label.setStyleSheet("color: #7f8792;")
+        # Update launch button text based on selected instance
+        version_id = self.installed_combo.currentText()
+        if version_id and version_id != "No versions installed":
+            instance_key = self._get_instance_key(version_id)
+            if instance_key in running:
+                self.launch_server_button.setText("Stop Server")
+            else:
+                self.launch_server_button.setText("Launch Server")
 
     def on_main_process_output(self):
         data = bytes(self.main_process.readAllStandardOutput()).decode(
@@ -1916,12 +2206,14 @@ class LauncherWindow(QMainWindow):
         if data:
             self.log_output.appendPlainText(data.rstrip())
 
-    def on_server_process_output(self):
-        data = bytes(self.server_process.readAllStandardOutput()).decode(
-            "utf-8", errors="replace"
-        )
-        if data:
-            self.log_output.appendPlainText(data.rstrip())
+    def _on_server_output(self, instance_key):
+        proc = self.server_processes.get(instance_key)
+        if proc:
+            data = bytes(proc.readAllStandardOutput()).decode(
+                "utf-8", errors="replace"
+            )
+            if data:
+                self.log_output.appendPlainText(f"[{instance_key}] {data.rstrip()}")
 
     def on_main_process_finished(self, exit_code, _status):
         if exit_code == 0:
@@ -1929,8 +2221,8 @@ class LauncherWindow(QMainWindow):
         else:
             self.status_label.setText(f"Finished with error (code {exit_code}).")
         self._set_main_busy(False)
-        self._set_server_busy(self.server_process.state() != QProcess.NotRunning)
         self.refresh_versions()
+        self._refresh_server_instances()
 
         # Chain: auto-install shader mods after Fabric install
         pending = getattr(self, "_pending_shader_install", None)
@@ -1947,10 +2239,12 @@ class LauncherWindow(QMainWindow):
         elif pending:
             self._pending_shader_install = None
 
-    def on_server_process_finished(self, exit_code, _status):
-        self.status_label.setText(f"Server stopped (code {exit_code}).")
-        self._set_server_busy(False)
-        self.refresh_versions()
+    def _on_server_finished(self, instance_key, exit_code):
+        self.status_label.setText(f"Server '{instance_key}' stopped (code {exit_code}).")
+        if instance_key in self.server_processes:
+            self.server_processes[instance_key].deleteLater()
+            del self.server_processes[instance_key]
+        self._update_server_running_label()
 
 
 def main():
