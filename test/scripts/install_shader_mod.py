@@ -7,7 +7,7 @@ from urllib.request import urlopen, Request
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from mc_common import download_url_file
+from mc_common import download_url_file, _SSL_CTX
 
 MODRINTH_API = "https://api.modrinth.com/v2"
 
@@ -26,7 +26,7 @@ SHADER_MODS = {
 def _modrinth_fetch(url):
     """GET JSON from Modrinth API with User-Agent."""
     req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
-    with urlopen(req, timeout=30) as resp:
+    with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
         return json.loads(resp.read())
 
 

@@ -54,7 +54,7 @@ try:
 except ImportError:
     requests = None
 
-from mc_common import format_cmd, check_username_taken, default_minecraft_dir
+from mc_common import format_cmd, check_username_taken, default_minecraft_dir, _SSL_CTX
 
 try:
     from version import __version__
@@ -111,7 +111,7 @@ class ManifestFetcher(QThread):
                 manifest = resp.json()
             else:
                 from urllib.request import urlopen
-                with urlopen(MANIFEST_URL, timeout=30) as fh:
+                with urlopen(MANIFEST_URL, timeout=30, context=_SSL_CTX) as fh:
                     manifest = json.loads(fh.read())
             # Cache locally
             try:
@@ -159,7 +159,7 @@ class UpdateChecker(QThread):
             from urllib.request import urlopen
             import json as _json
             url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-            with urlopen(url, timeout=10) as resp:
+            with urlopen(url, timeout=10, context=_SSL_CTX) as resp:
                 data = _json.loads(resp.read())
             tag = data.get("tag_name", "")
             latest = tag.lstrip("v")
@@ -268,7 +268,7 @@ class ModrinthShaderSearcher(QThread):
                 f"&limit=20"
             )
             req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
-            with urlopen(req, timeout=30) as resp:
+            with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
                 data = _json.loads(resp.read())
 
             hits = []
@@ -309,7 +309,7 @@ class ShaderPackDownloader(QThread):
             if self.mc_version:
                 url += f"?game_versions=[%22{quote(self.mc_version, safe='')}%22]"
             req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
-            with urlopen(req, timeout=30) as resp:
+            with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
                 versions = _json.loads(resp.read())
 
             if not versions:
@@ -1377,7 +1377,7 @@ class LauncherWindow(QMainWindow):
         self.status_label.setText("Downloading update...")
         try:
             from urllib.request import urlopen
-            with urlopen(self._update_url, timeout=120) as resp:
+            with urlopen(self._update_url, timeout=120, context=_SSL_CTX) as resp:
                 data = resp.read()
 
             if sys.platform == "win32":

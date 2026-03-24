@@ -8,7 +8,7 @@ from urllib.request import urlopen, Request
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from mc_common import fetch_json_url, download_url_file
+from mc_common import fetch_json_url, download_url_file, _SSL_CTX
 
 FABRIC_META = "https://meta.fabricmc.net/v2"
 
@@ -56,7 +56,7 @@ def _install_fabric_api(mc_version, base_dir):
             f"&loaders=[%22fabric%22]"
         )
         req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
-        with urlopen(req, timeout=30) as resp:
+        with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
             versions = json.loads(resp.read())
         if not versions:
             print(f"  No Fabric API version found for MC {mc_version}")

@@ -13,6 +13,7 @@ from mc_common import (
     detect_arch,
     find_java,
     default_minecraft_dir,
+    _SSL_CTX,
 )
 
 FORGE_PROMOTIONS_URL = (
@@ -27,7 +28,7 @@ def _get_forge_versions(mc_version):
     Returns dict like {"latest": "47.3.0", "recommended": "47.2.0"} or None.
     """
     req = Request(FORGE_PROMOTIONS_URL, headers={"User-Agent": "Mozilla/5.0"})
-    with urlopen(req, timeout=30) as resp:
+    with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
         data = json.loads(resp.read())
     promos = data.get("promos", {})
     result = {}
@@ -46,7 +47,7 @@ def _download_forge_file(url, dest):
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urlopen(req, timeout=120) as resp, open(dest, "wb") as out:
+    with urlopen(req, timeout=120, context=_SSL_CTX) as resp, open(dest, "wb") as out:
         while True:
             chunk = resp.read(128 * 1024)
             if not chunk:

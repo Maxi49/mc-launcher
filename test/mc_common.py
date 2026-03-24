@@ -4,6 +4,7 @@ import os
 import platform
 import re
 import shutil
+import ssl
 import stat
 import sys
 import time
@@ -33,6 +34,42 @@ REQUEST_TIMEOUT = (10, 60)
 DOWNLOAD_MAX_RETRIES = 3
 DOWNLOAD_RETRY_DELAY = 2
 
+# ── SSL context (macOS + pyenv compatibility) ─────────────────
+
+def _make_ssl_context():
+    """Create an SSL context that works on macOS with pyenv-installed Python."""
+    # 1. Try certifi (pip install certifi) — most reliable cross-platform
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        return ctx
+    except ImportError:
+        pass
+
+    # 2. Default context — works on Windows and Linux with system certs
+    ctx = ssl.create_default_context()
+
+    # 3. On macOS, if default context fails, try common cert file locations
+    if sys.platform == "darwin":
+        cert_paths = [
+            "/etc/ssl/cert.pem",
+            "/opt/homebrew/etc/openssl@3/cert.pem",
+            "/opt/homebrew/etc/openssl/cert.pem",
+            "/usr/local/etc/openssl@3/cert.pem",
+            "/usr/local/etc/openssl/cert.pem",
+        ]
+        for path in cert_paths:
+            if os.path.isfile(path):
+                try:
+                    ctx.load_verify_locations(path)
+                    return ctx
+                except ssl.SSLError:
+                    continue
+
+    return ctx
+
+_SSL_CTX = _make_ssl_context()
+
 # ── I/O and network (urllib, no requests) ─────────────────────
 
 
@@ -41,7 +78,7 @@ def read_json(path):
 
 
 def fetch_json_url(url):
-    with urlopen(url, timeout=RUNTIME_DOWNLOAD_TIMEOUT) as fh:
+    with urlopen(url, timeout=RUNTIME_DOWNLOAD_TIMEOUT, context=_SSL_CTX) as fh:
         return json.loads(fh.read())
 
 
@@ -57,7 +94,7 @@ def download_url_file(url, dest, expected_size=None, expected_sha1=None):
     for attempt in range(1, DOWNLOAD_MAX_RETRIES + 1):
         try:
             hasher = hashlib.sha1() if expected_sha1 else None
-            with urlopen(url, timeout=RUNTIME_DOWNLOAD_TIMEOUT) as fh, open(dest, "wb") as out:
+            with urlopen(url, timeout=RUNTIME_DOWNLOAD_TIMEOUT, context=_SSL_CTX) as fh, open(dest, "wb") as out:
                 while True:
                     chunk = fh.read(CHUNK_SIZE)
                     if not chunk:
@@ -393,7 +430,7 @@ def check_username_taken(username):
     """
     url = MOJANG_PROFILE_URL + username
     try:
-        with urlopen(url, timeout=10) as resp:
+        with urlopen(url, timeout=10, context=_SSL_CTX) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read())
                 return {
