@@ -15,6 +15,7 @@ from mc_common import (
     find_java,
     format_cmd,
     default_minecraft_dir,
+    sync_mods,
 )
 
 
@@ -171,6 +172,14 @@ def main():
     if fabric_jar.exists():
         print("Fabric server detected — using fabric-server-launch.jar")
         server_jar = fabric_jar
+        # Sync client mods to server before every launch
+        client_mods = minecraft_dir / "mods"
+        server_mods = server_dir / "mods"
+        if client_mods.is_dir():
+            print("Syncing client mods to server...")
+            count = sync_mods(client_mods, server_mods)
+            if count:
+                print(f"  {count} mod(s) synced.")
     elif forge_run.exists():
         print("Forge server detected — using Forge run script")
         is_forge_server = True

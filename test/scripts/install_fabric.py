@@ -8,7 +8,7 @@ from urllib.request import urlopen, Request
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from mc_common import fetch_json_url, download_url_file, _SSL_CTX
+from mc_common import fetch_json_url, download_url_file, sync_mods, _SSL_CTX
 
 FABRIC_META = "https://meta.fabricmc.net/v2"
 
@@ -151,7 +151,7 @@ def install_client(mc_version, base_dir, loader_version):
     return 0
 
 
-def install_server(mc_version, servers_dir, loader_version, installer_version, instance=None):
+def install_server(mc_version, servers_dir, loader_version, installer_version, instance=None, client_base_dir=None):
     server_dir = Path(servers_dir) / mc_version
     if instance:
         server_dir = server_dir / instance
@@ -165,6 +165,19 @@ def install_server(mc_version, servers_dir, loader_version, installer_version, i
     print(f"Downloading Fabric server launcher ({mc_version}, loader {loader_version})...")
     download_url_file(url, dest)
     print(f"Saved: {dest}")
+
+    # Install Fabric API into the server's mods/ folder so the server
+    # actually loads mods and stays in sync with the client.
+    _install_fabric_api(mc_version, server_dir)
+
+    # Sync client mods to server so both sides recognise the same blocks/items.
+    if client_base_dir:
+        client_mods = Path(client_base_dir) / "mods"
+        server_mods = server_dir / "mods"
+        print("Syncing client mods to server...")
+        count = sync_mods(client_mods, server_mods)
+        print(f"  {count} mod(s) synced to server.")
+
     print(
         "On first launch Fabric will download the vanilla server automatically.\n"
         "Place server-side mods in the server folder's 'mods/' subfolder."
@@ -175,7 +188,7 @@ def install_server(mc_version, servers_dir, loader_version, installer_version, i
 def main():
     parser = argparse.ArgumentParser(description="Install Fabric mod loader.")
     parser.add_argument("mc_version", help="Minecraft version, e.g. 1.21.1")
-    parser.add_argument("--base-dir", default=None, help="Path to .minecraft (client install)")
+    parser.add_argument("--base-dir", default=None, help="Path to .minecraft (client install, also used for mod sync in server mode)")
     parser.add_argument("--servers-dir", default=None, help="Path to servers dir (server install)")
     parser.add_argument("--loader-version", default=None, help="Fabric loader version (default: latest)")
     parser.add_argument("--installer-version", default=None, help="Fabric installer version (default: latest)")
@@ -193,7 +206,7 @@ def main():
             return 1
         installer = args.installer_version or _latest_installer()
         print(f"Installer: {installer}")
-        return install_server(args.mc_version, args.servers_dir, loader, installer, args.instance)
+        return install_server(args.mc_version, args.servers_dir, loader, installer, args.instance, args.base_dir)
     else:
         if not args.base_dir:
             print("--base-dir is required for client install", file=sys.stderr)

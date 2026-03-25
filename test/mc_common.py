@@ -416,6 +416,31 @@ def format_cmd(args):
     return " ".join(f"\"{a}\"" if " " in a else a for a in args)
 
 
+# ── Mod sync ─────────────────────────────────────────────────
+
+
+def sync_mods(client_mods_dir, server_mods_dir):
+    """Copy mod jars from the client mods folder to the server mods folder.
+
+    Skips mods that already exist (same filename) in the destination.
+    Returns the number of mods copied.
+    """
+    client_mods_dir = Path(client_mods_dir)
+    server_mods_dir = Path(server_mods_dir)
+    if not client_mods_dir.is_dir():
+        return 0
+    server_mods_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for jar in sorted(client_mods_dir.glob("*.jar")):
+        dest = server_mods_dir / jar.name
+        if dest.exists() and dest.stat().st_size == jar.stat().st_size:
+            continue
+        shutil.copy2(str(jar), str(dest))
+        print(f"  synced mod: {jar.name}")
+        copied += 1
+    return copied
+
+
 # ── Username validation ──────────────────────────────────────
 
 

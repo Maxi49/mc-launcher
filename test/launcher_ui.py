@@ -2044,7 +2044,7 @@ class LauncherWindow(QMainWindow):
 
         self.tabs.setCurrentIndex(0)
         if self.server_fabric_check.isChecked():
-            extra = [version_id, "--servers-dir", servers_dir, "--server"] + instance_args
+            extra = [version_id, "--servers-dir", servers_dir, "--base-dir", base_dir, "--server"] + instance_args
             args = self._script_args(self.fabric_installer_path, extra)
             self.start_main_process(args, f"Downloading Fabric server {version_id}...")
         elif self.server_forge_check.isChecked():
