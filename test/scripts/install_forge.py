@@ -214,7 +214,8 @@ def install_server(mc_version, servers_dir, forge_version, instance=None):
     from core.server_detection import write_server_type
     write_server_type(server_dir, "forge", installed_by="install_forge.py")
 
-    run_script = server_dir / ("run.bat" if sys.platform == "win32" else "run.sh")
+    from core.platform import forge_run_script_name
+    run_script = server_dir / forge_run_script_name()
     if run_script.exists():
         print(f"Forge server installed successfully.")
         print(f"Run script: {run_script}")
