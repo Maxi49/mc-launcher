@@ -103,6 +103,10 @@ def main():
                 verify_sha1=args.verify,
             )
 
+    # Write server type metadata for deterministic detection
+    from core.server_detection import write_server_type
+    write_server_type(server_dir, "vanilla", installed_by="download_server.py")
+
     print("done.")
     print(f"server_dir: {server_dir}")
     return 0

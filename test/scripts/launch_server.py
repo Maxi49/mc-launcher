@@ -1,7 +1,6 @@
 import argparse
 import base64
 import os
-import re
 import subprocess
 import sys
 import time
@@ -17,6 +16,10 @@ from mc_common import (
     default_minecraft_dir,
     sync_mods,
 )
+from core.version_utils import resolve_mc_version
+from core.server_detection import detect_server_type
+from core.constants import ServerType, FABRIC_SERVER_JAR, SERVER_JAR
+from core.platform import kill_process_tree as _platform_kill, forge_run_script_name
 
 
 def ensure_eula(server_dir):
@@ -88,19 +91,7 @@ def find_running_server_pids(server_jar):
 
 
 def kill_pid_tree(pid):
-    if sys.platform == "win32":
-        proc = subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            capture_output=True,
-            text=True,
-        )
-    else:
-        proc = subprocess.run(
-            ["kill", "-TERM", str(pid)],
-            capture_output=True,
-            text=True,
-        )
-    return proc.returncode == 0
+    return _platform_kill(pid)
 
 
 def main():
@@ -153,36 +144,48 @@ def main():
     servers_dir = Path(args.servers_dir)
     minecraft_dir = Path(args.minecraft_dir)
 
-    # If a Fabric client version is selected (e.g. fabric-loader-0.16.5-1.21.1),
-    # the server lives under the base MC version directory (1.21.1).
+    # If a modded client version is selected (e.g. fabric-loader-0.16.5-1.21.1
+    # or 1.20.1-forge-47.4.10), the server lives under the base MC version dir.
     version_id = args.version_id
-    mc_version_id = re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+    mc_version_id = resolve_mc_version(version_id)
     server_dir = servers_dir / mc_version_id
     if args.instance:
         server_dir = server_dir / args.instance
     if mc_version_id != version_id:
-        print(f"Fabric version detected — using server dir for {mc_version_id}")
+        print(f"Modded version detected — using server dir for {mc_version_id}")
 
-    server_jar = server_dir / "server.jar"
+    server_jar = server_dir / SERVER_JAR
     version_json = server_dir / f"{mc_version_id}.json"
 
-    fabric_jar = server_dir / "fabric-server-launch.jar"
-    forge_run = server_dir / ("run.bat" if sys.platform == "win32" else "run.sh")
+    detected_type = detect_server_type(server_dir)
+    forge_run = server_dir / forge_run_script_name()
+    fabric_jar = server_dir / FABRIC_SERVER_JAR
     is_forge_server = False
-    if fabric_jar.exists():
-        print("Fabric server detected — using fabric-server-launch.jar")
-        server_jar = fabric_jar
-        # Sync client mods to server before every launch
+
+    if detected_type == ServerType.FORGE:
+        print("Forge server detected — using Forge run script")
+        is_forge_server = True
         client_mods = minecraft_dir / "mods"
         server_mods = server_dir / "mods"
         if client_mods.is_dir():
             print("Syncing client mods to server...")
-            count = sync_mods(client_mods, server_mods)
-            if count:
-                print(f"  {count} mod(s) synced.")
-    elif forge_run.exists():
-        print("Forge server detected — using Forge run script")
-        is_forge_server = True
+            copied, skipped = sync_mods(client_mods, server_mods, server_loader="forge")
+            if copied:
+                print(f"  {copied} mod(s) synced.")
+            if skipped:
+                print(f"  {skipped} client-only mod(s) skipped.")
+    elif detected_type == ServerType.FABRIC:
+        print("Fabric server detected — using fabric-server-launch.jar")
+        server_jar = fabric_jar
+        client_mods = minecraft_dir / "mods"
+        server_mods = server_dir / "mods"
+        if client_mods.is_dir():
+            print("Syncing client mods to server...")
+            copied, skipped = sync_mods(client_mods, server_mods, server_loader="fabric")
+            if copied:
+                print(f"  {copied} mod(s) synced.")
+            if skipped:
+                print(f"  {skipped} client-only mod(s) skipped.")
     elif not server_jar.exists():
         print(f"missing server jar: {server_jar}", file=sys.stderr)
         print("run download_server.py (or install_fabric.py/install_forge.py --server) first", file=sys.stderr)
@@ -205,7 +208,8 @@ def main():
         jvm_args_file = server_dir / "user_jvm_args.txt"
         jvm_args_file.write_text("\n".join(jvm_lines) + "\n", encoding="utf-8")
 
-        if sys.platform == "win32":
+        from core.platform import is_windows
+        if is_windows():
             cmd = ["cmd", "/c", str(forge_run)]
         else:
             cmd = ["bash", str(forge_run)]
@@ -237,7 +241,15 @@ def main():
         print("java not found; use --java to set explicit path", file=sys.stderr)
         return 1
 
-    cmd = [str(java_exe)]
+    # Servers need java.exe (with console), not javaw.exe (windowless).
+    # javaw.exe suppresses stdout/stderr and can fail silently.
+    java_exe = str(java_exe)
+    if java_exe.endswith("javaw.exe"):
+        java_con = java_exe.replace("javaw.exe", "java.exe")
+        if Path(java_con).exists():
+            java_exe = java_con
+
+    cmd = [java_exe]
     if args.xms:
         cmd.append(f"-Xms{args.xms}")
     if args.xmx:

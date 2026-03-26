@@ -48,16 +48,7 @@ def parse_maven_name(name):
     return classifier
 
 
-def maven_to_path(name):
-    """Convert a Maven coordinate (group:artifact:version[:classifier]) to a relative jar path."""
-    parts = name.split(":")
-    if len(parts) < 3:
-        return None
-    group, artifact, version = parts[0], parts[1], parts[2]
-    classifier = parts[3] if len(parts) > 3 else None
-    group_path = group.replace(".", "/")
-    jar_name = f"{artifact}-{version}" + (f"-{classifier}" if classifier else "") + ".jar"
-    return f"{group_path}/{artifact}/{version}/{jar_name}"
+from core.version_utils import maven_to_path
 
 
 def native_classifier_matches(classifier, os_name, os_arch):
@@ -456,11 +447,15 @@ def main():
 
     # Override custom mods folder (e.g. Iris installer sets -Dfabric.modsFolder
     # to iris-reserved/) so that mods from the standard mods/ folder are loaded.
-    standard_mods = str(game_dir / "mods")
-    jvm_args = [
-        f"-Dfabric.modsFolder={standard_mods}" if a.startswith("-Dfabric.modsFolder=") else a
-        for a in jvm_args
-    ]
+    # Only applies to Fabric versions — the property is meaningless for Forge.
+    from core.version_utils import detect_version_loader
+    from core.constants import ModLoader
+    if detect_version_loader(version_id) == ModLoader.FABRIC:
+        standard_mods = str(game_dir / "mods")
+        jvm_args = [
+            f"-Dfabric.modsFolder={standard_mods}" if a.startswith("-Dfabric.modsFolder=") else a
+            for a in jvm_args
+        ]
 
     if args.official_jvm_flags:
         if not any(arg.startswith("-Xss") for arg in jvm_args):

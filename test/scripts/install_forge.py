@@ -210,6 +210,10 @@ def install_server(mc_version, servers_dir, forge_version, instance=None):
         print(f"Forge installer exited with code {result}.", file=sys.stderr)
         return 1
 
+    # Write server type metadata for deterministic detection
+    from core.server_detection import write_server_type
+    write_server_type(server_dir, "forge", installed_by="install_forge.py")
+
     run_script = server_dir / ("run.bat" if sys.platform == "win32" else "run.sh")
     if run_script.exists():
         print(f"Forge server installed successfully.")

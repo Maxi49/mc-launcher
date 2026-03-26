@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import os
 import platform
@@ -8,6 +9,8 @@ import ssl
 import stat
 import sys
 import time
+import tomllib
+import zipfile
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -394,7 +397,8 @@ def ensure_java_runtime(base_dir, component, os_arch):
 def find_java(java_arg):
     if java_arg:
         return java_arg
-    names = ("javaw.exe", "java.exe", "javaw", "java") if sys.platform == "win32" else ("java",)
+    from core.platform import java_executable_names
+    names = java_executable_names()
     for name in names:
         path = shutil.which(name)
         if path:
@@ -418,27 +422,139 @@ def format_cmd(args):
 
 # ── Mod sync ─────────────────────────────────────────────────
 
+# Mods that are always client-only but don't declare it in their metadata.
+# Keyed by modId (Forge mods.toml) or mod id (Fabric fabric.mod.json).
+_KNOWN_CLIENT_ONLY_MODS = frozenset({
+    "optifine",
+    "oculus",        # Forge shader mod (Iris equivalent)
+    "rubidium",      # Forge rendering mod (Sodium equivalent)
+    "sodium",        # Fabric rendering optimization
+    "iris",          # Fabric shader mod
+})
 
-def sync_mods(client_mods_dir, server_mods_dir):
-    """Copy mod jars from the client mods folder to the server mods folder.
 
-    Skips mods that already exist (same filename) in the destination.
-    Returns the number of mods copied.
+def is_client_only_mod(jar_path):
+    """Check if a mod JAR is client-only by inspecting its metadata.
+
+    Checks Fabric (fabric.mod.json), Forge (META-INF/mods.toml),
+    and NeoForge (META-INF/neoforge.mods.toml).
+    Also checks against a known list of client-only mod IDs for mods
+    that don't declare clientSideOnly (e.g. OptiFine).
+
+    Returns (True, reason) if client-only, (False, None) otherwise.
+    Unreadable or malformed JARs return (False, None) as a safe default.
+    """
+    try:
+        zf = zipfile.ZipFile(jar_path, "r")
+    except (zipfile.BadZipFile, OSError):
+        return False, None
+
+    with zf:
+        # Fabric: fabric.mod.json → "environment": "client"
+        try:
+            raw = zf.read("fabric.mod.json")
+            data = json.loads(raw)
+            if data.get("environment") == "client":
+                return True, "Fabric environment=client"
+            mod_id = data.get("id", "")
+            if mod_id.lower() in _KNOWN_CLIENT_ONLY_MODS:
+                return True, f"known client-only mod: {mod_id}"
+        except (KeyError, json.JSONDecodeError, OSError):
+            pass
+
+        # Forge / NeoForge: META-INF/mods.toml
+        for toml_path, label in (
+            ("META-INF/mods.toml", "Forge"),
+            ("META-INF/neoforge.mods.toml", "NeoForge"),
+        ):
+            try:
+                raw = zf.read(toml_path)
+                data = tomllib.load(io.BytesIO(raw))
+                if data.get("clientSideOnly") is True:
+                    return True, f"{label} clientSideOnly=true"
+                # Check mod IDs against known client-only list
+                for mod in data.get("mods", []):
+                    mod_id = mod.get("modId", "")
+                    if mod_id.lower() in _KNOWN_CLIENT_ONLY_MODS:
+                        return True, f"known client-only mod: {mod_id}"
+            except (KeyError, tomllib.TOMLDecodeError, OSError):
+                pass
+
+    return False, None
+
+
+def detect_mod_loader(jar_path):
+    """Detect which mod loader a JAR targets by inspecting its metadata.
+
+    Returns 'fabric', 'forge', or None if undetectable.
+    """
+    try:
+        zf = zipfile.ZipFile(jar_path, "r")
+    except (zipfile.BadZipFile, OSError):
+        return None
+
+    with zf:
+        names = zf.namelist()
+        has_fabric = "fabric.mod.json" in names
+        has_forge = "META-INF/mods.toml" in names or "META-INF/neoforge.mods.toml" in names
+        if has_fabric and not has_forge:
+            return "fabric"
+        if has_forge and not has_fabric:
+            return "forge"
+        if has_fabric and has_forge:
+            return "fabric"  # dual-loader mods, favor fabric
+    return None
+
+
+def sync_mods(client_mods_dir, server_mods_dir, server_loader=None):
+    """Sync mod jars from the client mods folder to the server mods folder.
+
+    - Copies new/updated mods from client to server.
+    - Removes server mods that are no longer active on the client
+      (deleted or disabled via .jar.disabled).
+    - Skips client-only mods and removes them from the server.
+    - If server_loader is set ('fabric' or 'forge'), skips mods
+      targeting a different loader.
+    Returns (copied, skipped) counts.
     """
     client_mods_dir = Path(client_mods_dir)
     server_mods_dir = Path(server_mods_dir)
     if not client_mods_dir.is_dir():
-        return 0
+        return 0, 0
     server_mods_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build set of active (non-client-only) client mod filenames
+    active_client_mods = set()
     copied = 0
+    skipped = 0
     for jar in sorted(client_mods_dir.glob("*.jar")):
+        client_only, reason = is_client_only_mod(jar)
+        if client_only:
+            print(f"  skipped client-only mod: {jar.name} ({reason})")
+            skipped += 1
+            continue
+        # Skip mods targeting a different loader
+        if server_loader:
+            mod_loader = detect_mod_loader(jar)
+            if mod_loader and mod_loader != server_loader:
+                print(f"  skipped {mod_loader} mod on {server_loader} server: {jar.name}")
+                skipped += 1
+                continue
+        active_client_mods.add(jar.name)
         dest = server_mods_dir / jar.name
         if dest.exists() and dest.stat().st_size == jar.stat().st_size:
             continue
         shutil.copy2(str(jar), str(dest))
         print(f"  synced mod: {jar.name}")
         copied += 1
-    return copied
+
+    # Remove server mods that are no longer active on the client
+    for server_jar in sorted(server_mods_dir.glob("*.jar")):
+        if server_jar.name not in active_client_mods:
+            server_jar.unlink()
+            print(f"  removed from server: {server_jar.name}")
+
+    return copied, skipped
 
 
 # ── Username validation ──────────────────────────────────────

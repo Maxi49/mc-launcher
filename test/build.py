@@ -13,6 +13,8 @@ PyInstaller.__main__.run([
     f"--add-data=scripts{sep}scripts",
     f"--add-data=mc_common.py{sep}.",
     f"--add-data=version.py{sep}.",
+    f"--add-data=core{sep}core",
+    f"--add-data=ui{sep}ui",
     "--noconfirm",
     "--clean",
 ])

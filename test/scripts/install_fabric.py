@@ -9,18 +9,9 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mc_common import fetch_json_url, download_url_file, sync_mods, _SSL_CTX
+from core.version_utils import maven_to_path as _maven_path
 
 FABRIC_META = "https://meta.fabricmc.net/v2"
-
-
-def _maven_path(name):
-    """Convert a Maven coordinate to a relative jar path."""
-    parts = name.split(":")
-    group, artifact, version = parts[0], parts[1], parts[2]
-    classifier = parts[3] if len(parts) > 3 else None
-    group_path = group.replace(".", "/")
-    jar_name = f"{artifact}-{version}" + (f"-{classifier}" if classifier else "") + ".jar"
-    return f"{group_path}/{artifact}/{version}/{jar_name}"
 
 
 def _latest_loader(mc_version):
@@ -166,6 +157,10 @@ def install_server(mc_version, servers_dir, loader_version, installer_version, i
     download_url_file(url, dest)
     print(f"Saved: {dest}")
 
+    # Write server type metadata for deterministic detection
+    from core.server_detection import write_server_type
+    write_server_type(server_dir, "fabric", installed_by="install_fabric.py")
+
     # Install Fabric API into the server's mods/ folder so the server
     # actually loads mods and stays in sync with the client.
     _install_fabric_api(mc_version, server_dir)
@@ -175,8 +170,10 @@ def install_server(mc_version, servers_dir, loader_version, installer_version, i
         client_mods = Path(client_base_dir) / "mods"
         server_mods = server_dir / "mods"
         print("Syncing client mods to server...")
-        count = sync_mods(client_mods, server_mods)
-        print(f"  {count} mod(s) synced to server.")
+        copied, skipped = sync_mods(client_mods, server_mods, server_loader="fabric")
+        print(f"  {copied} mod(s) synced to server.")
+        if skipped:
+            print(f"  {skipped} client-only mod(s) skipped.")
 
     print(
         "On first launch Fabric will download the vanilla server automatically.\n"

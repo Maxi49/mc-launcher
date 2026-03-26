@@ -21,7 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, QThread, Signal, QPropertyAnimation, QEasingCurve, QTimer
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -49,12 +49,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-try:
-    import requests
-except ImportError:
-    requests = None
-
-from mc_common import format_cmd, check_username_taken, default_minecraft_dir, _SSL_CTX
+from mc_common import check_username_taken, default_minecraft_dir, detect_mod_loader, sync_mods, _SSL_CTX
+from core.version_utils import resolve_mc_version as _resolve_mc_version, detect_version_loader as _detect_version_loader, extract_mod_mc_version as _extract_mod_mc_version
+from core.platform import open_folder as _open_folder
+from core.constants import ModLoader, TAB_HOME, TAB_MODS, TAB_SHADERS, TAB_SERVER, TAB_SETTINGS
+from ui.workers import ManifestFetcher, UsernameChecker, UpdateChecker, ModrinthShaderSearcher, ShaderPackDownloader
+from ui.style import PLAY_BUTTON_STYLE, MAIN_STYLESHEET
+from ui.settings_manager import SettingsManager
+from ui.process_manager import ProcessManager
 
 try:
     from version import __version__
@@ -97,242 +99,6 @@ def list_installed_versions(base_dir):
     return sorted(versions)
 
 
-class ManifestFetcher(QThread):
-    """Fetch version manifest from Mojang in a background thread."""
-
-    finished = Signal(list)
-
-    def run(self):
-        versions = []
-        try:
-            if requests is not None:
-                resp = requests.get(MANIFEST_URL, timeout=(10, 30))
-                resp.raise_for_status()
-                manifest = resp.json()
-            else:
-                from urllib.request import urlopen
-                with urlopen(MANIFEST_URL, timeout=30, context=_SSL_CTX) as fh:
-                    manifest = json.loads(fh.read())
-            # Cache locally
-            try:
-                MANIFEST_CACHE.write_text(
-                    json.dumps(manifest, ensure_ascii=True, indent=2),
-                    encoding="utf-8",
-                )
-            except OSError:
-                pass
-            versions = manifest.get("versions", [])
-        except Exception:
-            # Try cached version
-            try:
-                if MANIFEST_CACHE.exists():
-                    manifest = json.loads(
-                        MANIFEST_CACHE.read_text(encoding="utf-8")
-                    )
-                    versions = manifest.get("versions", [])
-            except (OSError, json.JSONDecodeError):
-                pass
-        self.finished.emit(versions)
-
-
-class UsernameChecker(QThread):
-    """Check if a username is taken by a premium Minecraft account."""
-
-    finished = Signal(dict)
-
-    def __init__(self, username, parent=None):
-        super().__init__(parent)
-        self.username = username
-
-    def run(self):
-        result = check_username_taken(self.username)
-        self.finished.emit(result)
-
-
-class UpdateChecker(QThread):
-    """Check GitHub releases for a newer version in the background."""
-
-    update_available = Signal(str, str)  # tag, download_url
-
-    def run(self):
-        try:
-            from urllib.request import urlopen
-            import json as _json
-            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-            with urlopen(url, timeout=10, context=_SSL_CTX) as resp:
-                data = _json.loads(resp.read())
-            tag = data.get("tag_name", "")
-            latest = tag.lstrip("v")
-            if self._newer(latest, __version__):
-                asset_name = (
-                    "launcher-windows.exe" if sys.platform == "win32"
-                    else "launcher-macos"
-                )
-                for asset in data.get("assets", []):
-                    if asset["name"] == asset_name:
-                        self.update_available.emit(tag, asset["browser_download_url"])
-                        return
-        except Exception:
-            pass
-
-    @staticmethod
-    def _newer(latest, current):
-        def parse(v):
-            try:
-                return tuple(int(x) for x in v.strip().split("."))
-            except Exception:
-                return (0,)
-        return parse(latest) > parse(current)
-
-
-def _resolve_mc_version(version_name):
-    """Extract the base Minecraft version from a loader version string.
-
-    Examples:
-        fabric-loader-0.16.5-1.21.1  -> 1.21.1
-        1.20.1-forge-47.3.0          -> 1.20.1
-        1.21.1                       -> 1.21.1
-    """
-    import re
-    # Fabric: MC version is last segment  e.g. fabric-loader-0.16.5-1.21.1
-    if "fabric" in version_name.lower():
-        matches = re.findall(r'(\d+\.\d+(?:\.\d+)?)', version_name)
-        return matches[-1] if matches else version_name
-    # Forge / vanilla: MC version is first segment  e.g. 1.20.1-forge-47.3.0
-    m = re.search(r'(\d+\.\d+(?:\.\d+)?)', version_name)
-    return m.group(1) if m else version_name
-
-
-def _detect_version_loader(version_name):
-    """Detect the mod loader from a version directory name.
-
-    Returns 'fabric', 'forge', or 'vanilla'.
-    """
-    lower = version_name.lower()
-    if "fabric" in lower:
-        return "fabric"
-    if "forge" in lower:
-        return "forge"
-    return "vanilla"
-
-
-def _extract_mod_mc_version(filename):
-    """Extract MC version from mod filename.
-
-    Patterns:
-      mod-name+mc1.21.1.jar   -> 1.21.1
-      mod-name+1.21.1.jar     -> 1.21.1
-      mod-name-mc1.21.1.jar   -> 1.21.1
-      mod-name_MC_1.21.1.jar  -> 1.21.1
-      mod-name-1.21.1.jar     -> 1.21.1  (last mc-like version)
-    Returns None if no version detected.
-    """
-    import re
-    stem = Path(filename).stem
-    m = re.search(r'\+(?:mc)?(\d+\.\d+(?:\.\d+)?)', stem, re.IGNORECASE)
-    if m:
-        return m.group(1)
-    m = re.search(r'[-_]mc[_.]?(\d+\.\d+(?:\.\d+)?)', stem, re.IGNORECASE)
-    if m:
-        return m.group(1)
-    matches = re.findall(r'(\d+\.\d+(?:\.\d+)?)', stem)
-    return matches[-1] if matches else None
-
-
-class ModrinthShaderSearcher(QThread):
-    """Search Modrinth for shader packs in background."""
-    finished = Signal(list)
-    error = Signal(str)
-
-    def __init__(self, query="", mc_version="", parent=None):
-        super().__init__(parent)
-        self.query = query
-        self.mc_version = mc_version
-
-    def run(self):
-        try:
-            from urllib.request import urlopen, Request
-            from urllib.parse import quote
-            import json as _json
-
-            facets = '[["project_type:shader"]]'
-            if self.mc_version:
-                facets = (
-                    f'[["project_type:shader"],'
-                    f'["versions:{self.mc_version}"]]'
-                )
-            url = (
-                f"https://api.modrinth.com/v2/search"
-                f"?facets={quote(facets, safe='')}"
-                f"&query={quote(self.query, safe='')}"
-                f"&limit=20"
-            )
-            req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
-            with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-                data = _json.loads(resp.read())
-
-            hits = []
-            for h in data.get("hits", []):
-                hits.append({
-                    "title": h.get("title", ""),
-                    "slug": h.get("slug", ""),
-                    "author": h.get("author", ""),
-                    "downloads": h.get("downloads", 0),
-                    "icon_url": h.get("icon_url", ""),
-                })
-            self.finished.emit(hits)
-        except Exception as exc:
-            self.error.emit(str(exc))
-            self.finished.emit([])
-
-
-class ShaderPackDownloader(QThread):
-    """Download a shader pack .zip from Modrinth in background."""
-    finished = Signal(bool, str)  # success, message
-
-    def __init__(self, slug, mc_version, dest_dir, parent=None):
-        super().__init__(parent)
-        self.slug = slug
-        self.mc_version = mc_version
-        self.dest_dir = dest_dir
-
-    def run(self):
-        try:
-            from urllib.request import urlopen, Request
-            from urllib.parse import quote
-            import json as _json
-
-            url = (
-                f"https://api.modrinth.com/v2/project"
-                f"/{quote(self.slug, safe='')}/version"
-            )
-            if self.mc_version:
-                url += f"?game_versions=[%22{quote(self.mc_version, safe='')}%22]"
-            req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
-            with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-                versions = _json.loads(resp.read())
-
-            if not versions:
-                self.finished.emit(False, f"No versions found for {self.slug}")
-                return
-
-            file_info = versions[0]["files"][0]
-            filename = file_info["filename"]
-            file_url = file_info["url"]
-            dest = Path(self.dest_dir) / filename
-
-            if dest.exists():
-                self.finished.emit(True, f"{filename} already exists.")
-                return
-
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            from mc_common import download_url_file
-            download_url_file(file_url, dest)
-            self.finished.emit(True, f"Downloaded {filename}")
-        except Exception as exc:
-            self.finished.emit(False, str(exc))
-
-
 class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -362,15 +128,20 @@ class LauncherWindow(QMainWindow):
         self._last_checked_username = ""
         self._username_is_taken = None  # None=unknown, True=taken, False=available
 
-        self.main_process = QProcess(self)
-        self.main_process.setProcessChannelMode(QProcess.MergedChannels)
-        self.main_process.readyReadStandardOutput.connect(self.on_main_process_output)
-        self.main_process.readyReadStandardError.connect(self.on_main_process_output)
-        self.main_process.finished.connect(self.on_main_process_finished)
-
-        self.server_processes = {}  # {instance_key: QProcess}
+        self.proc_mgr = ProcessManager(self.script_dir, parent=self)
+        self.server_processes = self.proc_mgr.server_processes  # alias for compatibility
+        self.main_process = self.proc_mgr.main_process  # alias for compatibility
 
         self._build_ui()
+
+        # Connect ProcessManager signals to UI
+        self.proc_mgr.main_output.connect(lambda text: self.log_output.appendPlainText(text))
+        self.proc_mgr.main_started.connect(lambda cmd: self.log_output.appendPlainText(f"$ {cmd}"))
+        self.proc_mgr.main_finished.connect(self.on_main_process_finished)
+        self.proc_mgr.server_output.connect(self._on_pm_server_output)
+        self.proc_mgr.server_started.connect(self._on_pm_server_started)
+        self.proc_mgr.server_finished.connect(self._on_server_finished)
+
         self._load_settings()
         self.refresh_versions()
         self._fetch_manifest()
@@ -426,30 +197,7 @@ class LauncherWindow(QMainWindow):
         self.launch_button = QPushButton("PLAY")
         self.launch_button.setMinimumHeight(52)
         self.launch_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.launch_button.setStyleSheet(
-            """
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #2ea043, stop:1 #238636);
-                border: 1px solid #2ea043;
-                font-size: 18px;
-                font-weight: 700;
-                border-radius: 10px;
-                padding: 10px 20px;
-                color: #ffffff;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #3fb950, stop:1 #2ea043);
-                border: 1px solid #3fb950;
-            }
-            QPushButton:disabled {
-                background: #1a3a1a;
-                color: #5a7a5a;
-                border: 1px solid #253525;
-            }
-            """
-        )
+        self.launch_button.setStyleSheet(PLAY_BUTTON_STYLE)
         self.launch_button.clicked.connect(self.on_launch_clicked)
         self._play_opacity = QGraphicsOpacityEffect(self.launch_button)
         self._play_opacity.setOpacity(1.0)
@@ -471,110 +219,7 @@ class LauncherWindow(QMainWindow):
         self.status_label = QLabel("Ready.")
         self.statusBar().addWidget(self.status_label, 1)
 
-        self.setStyleSheet(
-            """
-            QWidget {
-                background-color: #1a1d23;
-                color: #e6edf3;
-            }
-            QScrollArea {
-                background-color: #1a1d23;
-            }
-            QTabWidget::pane {
-                border: 1px solid #2d3548;
-                border-radius: 6px;
-                background: #1a1d23;
-                top: -1px;
-            }
-            QTabBar::tab {
-                background: #1e2330;
-                border: 1px solid #2d3548;
-                padding: 8px 16px;
-                margin-right: 2px;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-            }
-            QTabBar::tab:selected {
-                background: #1a1d23;
-                border-bottom: none;
-                color: #58a6ff;
-            }
-            QTabBar::tab:hover {
-                background: #252d3b;
-            }
-            QLineEdit, QPlainTextEdit, QListWidget, QSpinBox, QComboBox {
-                background-color: #1e2330;
-                border: 1px solid #2d3548;
-                padding: 6px;
-                border-radius: 6px;
-            }
-            QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QComboBox:focus {
-                border: 1px solid #58a6ff;
-            }
-            QComboBox::drop-down {
-                border: none;
-                padding-right: 8px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1e2330;
-                border: 1px solid #2d3548;
-                selection-background-color: #2a3a4a;
-            }
-            QPushButton, QToolButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #2c3444, stop:1 #252d3b);
-                border: 1px solid #3a4250;
-                padding: 6px 10px;
-                border-radius: 6px;
-            }
-            QPushButton:hover, QToolButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #374050, stop:1 #2c3444);
-                border: 1px solid #58a6ff;
-            }
-            QPushButton:disabled {
-                color: #7f8792;
-                background-color: #242a33;
-                border: 1px solid #2d3548;
-            }
-            QPushButton#serverButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #253350, stop:1 #1e2a42);
-                border: 1px solid #2d4a6f;
-            }
-            QPushButton#serverButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #2e3d5e, stop:1 #253350);
-                border: 1px solid #58a6ff;
-            }
-            QGroupBox {
-                border: 1px solid #2d3548;
-                border-radius: 8px;
-                margin-top: 6px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 4px;
-                color: #58a6ff;
-            }
-            QCheckBox { spacing: 6px; }
-            QScrollBar:vertical {
-                background: #1a1d23;
-                width: 10px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical {
-                background: #2d3548;
-                border-radius: 5px;
-                min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #3a4560;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-            """
-        )
+        self.setStyleSheet(MAIN_STYLESHEET)
 
     # ── Tab builders ───────────────────────────────────────────
 
@@ -638,6 +283,11 @@ class LauncherWindow(QMainWindow):
         self.mods_show_all_check.toggled.connect(self._refresh_mods)
         filter_row.addWidget(self.mods_show_all_check)
         filter_row.addStretch()
+        filter_row.addWidget(QLabel("Loader:"))
+        self.mods_loader_filter = QComboBox()
+        self.mods_loader_filter.addItems(["All", "Fabric", "Forge", "Unknown"])
+        self.mods_loader_filter.currentIndexChanged.connect(self._refresh_mods)
+        filter_row.addWidget(self.mods_loader_filter)
         layout.addLayout(filter_row)
 
         # Mods list
@@ -652,8 +302,11 @@ class LauncherWindow(QMainWindow):
         refresh_mods_btn.clicked.connect(self._refresh_mods)
         open_mods_btn = QPushButton("Open mods folder")
         open_mods_btn.clicked.connect(self._open_mods_folder)
+        apply_server_btn = QPushButton("Apply to Server")
+        apply_server_btn.clicked.connect(self._sync_mods_to_server)
         mods_buttons.addWidget(refresh_mods_btn)
         mods_buttons.addWidget(open_mods_btn)
+        mods_buttons.addWidget(apply_server_btn)
         layout.addLayout(mods_buttons)
 
         # Refresh mods when selected version changes
@@ -846,9 +499,20 @@ class LauncherWindow(QMainWindow):
         layout.addStretch()
         scroll.setWidget(content)
 
+        # Server log panel (below scroll area, always visible)
+        server_log_label = QLabel("Server Logs")
+        server_log_label.setStyleSheet("color: #58a6ff; font-weight: 600;")
+        self.server_log_output = QPlainTextEdit()
+        self.server_log_output.setReadOnly(True)
+        self.server_log_output.setMaximumBlockCount(2000)
+        self.server_log_output.setMinimumHeight(120)
+        self.server_log_output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
         tab_layout = QVBoxLayout(tab)
         tab_layout.setContentsMargins(0, 0, 0, 0)
-        tab_layout.addWidget(scroll)
+        tab_layout.addWidget(scroll, 1)
+        tab_layout.addWidget(server_log_label)
+        tab_layout.addWidget(self.server_log_output, 1)
 
         # Refresh instances when version changes
         self.installed_combo.currentTextChanged.connect(self._refresh_server_instances)
@@ -991,27 +655,47 @@ class LauncherWindow(QMainWindow):
         jars = sorted(mods_dir.glob("*.jar"))
         disabled = sorted(mods_dir.glob("*.jar.disabled"))
 
+        loader_filter = self.mods_loader_filter.currentText().lower()  # all/fabric/forge/unknown
+
         def _matches_version(filename):
             if show_all or not mc_version:
                 return True
             mod_ver = _extract_mod_mc_version(filename)
             return mod_ver is None or mod_ver == mc_version
 
+        def _matches_loader(jar_path):
+            if loader_filter == "all":
+                return True
+            loader = detect_mod_loader(jar_path)
+            if loader_filter == "unknown":
+                return loader is None
+            return loader == loader_filter
+
+        def _loader_tag(jar_path):
+            loader = detect_mod_loader(jar_path)
+            if loader == "fabric":
+                return "[Fabric] "
+            if loader == "forge":
+                return "[Forge] "
+            return ""
+
         shown = 0
         for jar in jars:
-            if not _matches_version(jar.name):
+            if not _matches_version(jar.name) or not _matches_loader(jar):
                 continue
-            item = QListWidgetItem(jar.stem)
+            tag = _loader_tag(jar)
+            item = QListWidgetItem(f"{tag}{jar.stem}")
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
             item.setData(Qt.UserRole, str(jar))
             self.mods_list.addItem(item)
             shown += 1
         for jar in disabled:
-            if not _matches_version(jar.name):
+            if not _matches_version(jar.name) or not _matches_loader(jar):
                 continue
             name = jar.name.removesuffix(".jar.disabled")
-            item = QListWidgetItem(name)
+            tag = _loader_tag(jar)
+            item = QListWidgetItem(f"{tag}{name}")
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
             item.setData(Qt.UserRole, str(jar))
@@ -1042,12 +726,44 @@ class LauncherWindow(QMainWindow):
         except OSError as e:
             self.status_label.setText(f"Failed to toggle mod: {e}")
 
+    def _sync_mods_to_server(self):
+        """Sync client mods to server directory if a server is installed."""
+        base_dir = self.base_dir_edit.text().strip()
+        if not base_dir:
+            return
+        version_id = self.installed_combo.currentText()
+        if not version_id or version_id == "No versions installed":
+            return
+        servers_dir = self._resolve_servers_dir(base_dir)
+        server_dir = self._resolve_server_dir(servers_dir, version_id)
+        server_mods = Path(server_dir) / "mods"
+        # Only sync if server has been set up (mods folder exists)
+        if not server_mods.exists():
+            return
+        client_mods = Path(base_dir) / "mods"
+        # Detect server loader type
+        loader = _detect_version_loader(version_id)
+        server_loader = loader if loader != "vanilla" else None
+        copied, skipped = sync_mods(client_mods, server_mods, server_loader=server_loader)
+        parts = []
+        if copied:
+            parts.append(f"{copied} synced")
+        if skipped:
+            parts.append(f"{skipped} skipped")
+        if parts:
+            self.status_label.setText(f"Server mods updated: {', '.join(parts)}.")
+            # Warn if server is running
+            instance_key = self._get_instance_key(version_id)
+            if self.proc_mgr.is_server_running(instance_key):
+                self.server_log_output.appendPlainText(
+                    "⚠ Mods changed — restart the server to apply."
+                )
+
     # ── Server instances ────────────────────────────────────────
 
     def _resolve_server_dir(self, servers_dir, version_id):
         """Return the server directory, accounting for instance selection."""
-        import re
-        mc_version = re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+        mc_version = _resolve_mc_version(version_id)
         server_dir = Path(servers_dir) / mc_version
         instance = self.server_instance_combo.currentText()
         if instance and instance != "(default)":
@@ -1056,12 +772,11 @@ class LauncherWindow(QMainWindow):
 
     def _list_server_instances(self, version_id):
         """Return list of instance names for the given version."""
-        import re
         base_dir = self.base_dir_edit.text().strip()
         if not base_dir:
             return []
         servers_dir = self._resolve_servers_dir(base_dir)
-        mc_version = re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+        mc_version = _resolve_mc_version(version_id)
         version_dir = Path(servers_dir) / mc_version
         if not version_dir.exists():
             return []
@@ -1169,7 +884,7 @@ class LauncherWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid name", "Use only letters, numbers, spaces, dashes, and dots.")
             return
         servers_dir = self._resolve_servers_dir(base_dir)
-        mc_version = _re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+        mc_version = _resolve_mc_version(version_id)
         version_dir = Path(servers_dir) / mc_version
         instance_dir = version_dir / name
         if instance_dir.exists():
@@ -1208,9 +923,9 @@ class LauncherWindow(QMainWindow):
         version_id = self.installed_combo.currentText()
         if version_id:
             import re as _re
-            mc_version = _re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+            mc_version = _resolve_mc_version(version_id)
             instance_key = f"{mc_version}/{instance}"
-            if instance_key in self.server_processes and self.server_processes[instance_key].state() != QProcess.NotRunning:
+            if self.proc_mgr.is_server_running(instance_key):
                 QMessageBox.warning(self, "Server running", "Stop the server before deleting.")
                 return
         reply = QMessageBox.warning(
@@ -1224,7 +939,7 @@ class LauncherWindow(QMainWindow):
         base_dir = self.base_dir_edit.text().strip()
         servers_dir = self._resolve_servers_dir(base_dir)
         import re as _re
-        mc_version = _re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+        mc_version = _resolve_mc_version(version_id)
         instance_dir = Path(servers_dir) / mc_version / instance
         if instance_dir.exists():
             shutil.rmtree(str(instance_dir), ignore_errors=True)
@@ -1411,12 +1126,7 @@ class LauncherWindow(QMainWindow):
             return
         mods_dir = Path(base_dir) / "mods"
         mods_dir.mkdir(parents=True, exist_ok=True)
-        if sys.platform == "win32":
-            os.startfile(str(mods_dir))
-        elif sys.platform == "darwin":
-            subprocess.run(["open", str(mods_dir)])
-        else:
-            subprocess.run(["xdg-open", str(mods_dir)])
+        _open_folder(mods_dir)
 
     # ── Shaders ───────────────────────────────────────────────
 
@@ -1478,12 +1188,7 @@ class LauncherWindow(QMainWindow):
             return
         sp_dir = Path(base_dir) / "shaderpacks"
         sp_dir.mkdir(parents=True, exist_ok=True)
-        if sys.platform == "win32":
-            os.startfile(str(sp_dir))
-        elif sys.platform == "darwin":
-            subprocess.run(["open", str(sp_dir)])
-        else:
-            subprocess.run(["xdg-open", str(sp_dir)])
+        _open_folder(sp_dir)
 
     def _on_install_shader_mod(self):
         base_dir = self._ensure_base_dir()
@@ -1518,13 +1223,13 @@ class LauncherWindow(QMainWindow):
             }
             extra = [version_name, "--base-dir", base_dir]
             args = self._script_args(self.fabric_installer_path, extra)
-            self.tabs.setCurrentIndex(0)
+            self.tabs.setCurrentIndex(TAB_HOME)
             self.start_main_process(args, f"Installing Fabric for {version_name}...")
             return
 
         extra = [mc_version, "--base-dir", base_dir, "--loader", loader]
         args = self._script_args(self.shader_mod_installer_path, extra)
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentIndex(TAB_HOME)
         self.start_main_process(
             args, f"Installing shader mod ({loader}) for {mc_version}..."
         )
@@ -1809,10 +1514,7 @@ class LauncherWindow(QMainWindow):
         if self.manifest_fetcher is not None and self.manifest_fetcher.isRunning():
             self.manifest_fetcher.quit()
             self.manifest_fetcher.wait(3000)
-        for key, proc in list(self.server_processes.items()):
-            if proc.state() != QProcess.NotRunning:
-                proc.terminate()
-                proc.waitForFinished(3000)
+        self.proc_mgr.cleanup()
         super().closeEvent(event)
 
     # ── Browse helpers ─────────────────────────────────────────
@@ -1929,7 +1631,7 @@ class LauncherWindow(QMainWindow):
         args = self._script_args(self.downloader_path, extra)
 
         # Auto-show logs during download
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentIndex(TAB_HOME)
         self.start_main_process(args, f"Downloading {version_id}...")
 
     def on_launch_clicked(self):
@@ -1998,7 +1700,7 @@ class LauncherWindow(QMainWindow):
             return
         extra = [version_id, "--base-dir", base_dir]
         args = self._script_args(self.fabric_installer_path, extra)
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentIndex(TAB_HOME)
         self.start_main_process(args, f"Installing Fabric for {version_id}...")
 
     def on_install_forge_clicked(self):
@@ -2011,7 +1713,7 @@ class LauncherWindow(QMainWindow):
             return
         extra = [version_id, "--base-dir", base_dir]
         args = self._script_args(self.forge_installer_path, extra)
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentIndex(TAB_HOME)
         self.start_main_process(args, f"Installing Forge for {version_id}...")
 
     def _get_instance_args(self):
@@ -2023,8 +1725,7 @@ class LauncherWindow(QMainWindow):
 
     def _get_instance_key(self, version_id):
         """Return instance key for process tracking."""
-        import re
-        mc_version = re.sub(r'^fabric-loader-[\d.]+-', '', version_id)
+        mc_version = _resolve_mc_version(version_id)
         instance = self.server_instance_combo.currentText() or "(default)"
         return f"{mc_version}/{instance}"
 
@@ -2042,7 +1743,7 @@ class LauncherWindow(QMainWindow):
             QMessageBox.warning(self, "No version", "Wait for versions to load or select one.")
             return
 
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentIndex(TAB_HOME)
         if self.server_fabric_check.isChecked():
             extra = [version_id, "--servers-dir", servers_dir, "--base-dir", base_dir, "--server"] + instance_args
             args = self._script_args(self.fabric_installer_path, extra)
@@ -2077,8 +1778,8 @@ class LauncherWindow(QMainWindow):
         instance_key = self._get_instance_key(version_id)
 
         # If this instance is already running, offer to stop it
-        if instance_key in self.server_processes and self.server_processes[instance_key].state() != QProcess.NotRunning:
-            self.server_processes[instance_key].terminate()
+        if self.proc_mgr.is_server_running(instance_key):
+            self.proc_mgr.stop_server(instance_key)
             self.status_label.setText(f"Stopping server {instance_key}...")
             self._update_server_running_label()
             return
@@ -2113,51 +1814,24 @@ class LauncherWindow(QMainWindow):
     # ── Process management ─────────────────────────────────────
 
     def start_main_process(self, args, label):
-        if self.main_process.state() != QProcess.NotRunning:
+        if self.proc_mgr.is_main_busy():
             QMessageBox.warning(self, "Busy", "Another task is already running.")
             return
 
         self._save_settings()
-        self.log_output.appendPlainText(f"$ {format_cmd([str(a) for a in args])}")
         self.status_label.setText(label)
         self._set_main_busy(True)
-
-        env = QProcessEnvironment.systemEnvironment()
-        env.insert("PYTHONUNBUFFERED", "1")
-        self.main_process.setProcessEnvironment(env)
-        self.main_process.setWorkingDirectory(str(self.script_dir))
-        self.main_process.start(args[0], [str(a) for a in args[1:]])
+        self.proc_mgr.start_main(args)
 
     def start_server_process(self, args, label, instance_key):
-        if instance_key in self.server_processes:
-            proc = self.server_processes[instance_key]
-            if proc.state() != QProcess.NotRunning:
-                QMessageBox.warning(self, "Server running",
-                    f"Server '{instance_key}' is already running.")
-                return
+        if self.proc_mgr.is_server_running(instance_key):
+            QMessageBox.warning(self, "Server running",
+                f"Server '{instance_key}' is already running.")
+            return
 
         self._save_settings()
-        self.log_output.appendPlainText(f"$ {format_cmd([str(a) for a in args])}")
         self.status_label.setText(label)
-
-        proc = QProcess(self)
-        proc.setProcessChannelMode(QProcess.MergedChannels)
-        proc.readyReadStandardOutput.connect(
-            lambda key=instance_key: self._on_server_output(key)
-        )
-        proc.readyReadStandardError.connect(
-            lambda key=instance_key: self._on_server_output(key)
-        )
-        proc.finished.connect(
-            lambda code, status, key=instance_key: self._on_server_finished(key, code)
-        )
-        self.server_processes[instance_key] = proc
-
-        env = QProcessEnvironment.systemEnvironment()
-        env.insert("PYTHONUNBUFFERED", "1")
-        proc.setProcessEnvironment(env)
-        proc.setWorkingDirectory(str(self.script_dir))
-        proc.start(args[0], [str(a) for a in args[1:]])
+        self.proc_mgr.start_server(args, instance_key)
         self._update_server_running_label()
 
     def _set_main_busy(self, busy):
@@ -2182,8 +1856,7 @@ class LauncherWindow(QMainWindow):
             self._play_fade_anim = anim
 
     def _update_server_running_label(self):
-        running = [k for k, p in self.server_processes.items()
-                   if p.state() != QProcess.NotRunning]
+        running = self.proc_mgr.running_servers()
         if running:
             self.server_running_label.setText(f"Running: {', '.join(running)}")
             self.server_running_label.setStyleSheet("color: #3fb950; font-weight: 600;")
@@ -2199,23 +1872,17 @@ class LauncherWindow(QMainWindow):
             else:
                 self.launch_server_button.setText("Launch Server")
 
-    def on_main_process_output(self):
-        data = bytes(self.main_process.readAllStandardOutput()).decode(
-            "utf-8", errors="replace"
-        )
-        if data:
-            self.log_output.appendPlainText(data.rstrip())
+    def _on_pm_server_output(self, instance_key, text):
+        line = f"[{instance_key}] {text}"
+        self.log_output.appendPlainText(line)
+        self.server_log_output.appendPlainText(line)
 
-    def _on_server_output(self, instance_key):
-        proc = self.server_processes.get(instance_key)
-        if proc:
-            data = bytes(proc.readAllStandardOutput()).decode(
-                "utf-8", errors="replace"
-            )
-            if data:
-                self.log_output.appendPlainText(f"[{instance_key}] {data.rstrip()}")
+    def _on_pm_server_started(self, instance_key, cmd_line):
+        line = f"$ {cmd_line}"
+        self.log_output.appendPlainText(line)
+        self.server_log_output.appendPlainText(line)
 
-    def on_main_process_finished(self, exit_code, _status):
+    def on_main_process_finished(self, exit_code):
         if exit_code == 0:
             self.status_label.setText("Done.")
         else:
@@ -2240,10 +1907,9 @@ class LauncherWindow(QMainWindow):
             self._pending_shader_install = None
 
     def _on_server_finished(self, instance_key, exit_code):
-        self.status_label.setText(f"Server '{instance_key}' stopped (code {exit_code}).")
-        if instance_key in self.server_processes:
-            self.server_processes[instance_key].deleteLater()
-            del self.server_processes[instance_key]
+        msg = f"Server '{instance_key}' stopped (code {exit_code})."
+        self.status_label.setText(msg)
+        self.server_log_output.appendPlainText(f"--- {msg} ---")
         self._update_server_running_label()
 
 
