@@ -1227,7 +1227,7 @@ class LauncherWindow(QMainWindow):
             self.start_main_process(args, f"Installing Fabric for {version_name}...")
             return
 
-        extra = [mc_version, "--base-dir", base_dir, "--loader", loader]
+        extra = [mc_version, "--base-dir", base_dir, "--loader", str(loader.value) if hasattr(loader, 'value') else str(loader)]
         args = self._script_args(self.shader_mod_installer_path, extra)
         self.tabs.setCurrentIndex(TAB_HOME)
         self.start_main_process(
