@@ -112,6 +112,47 @@ class UpdateChecker(QThread):
         return parse(latest) > parse(current)
 
 
+def _mc_version_variants(mc_version):
+    """Return version strings to try: exact, then major.minor, then no filter.
+
+    For '1.21.11' returns ['1.21.11', '1.21'].
+    For '1.21' returns ['1.21'].
+    """
+    if not mc_version:
+        return []
+    parts = mc_version.split(".")
+    variants = [mc_version]
+    if len(parts) >= 3:
+        variants.append(f"{parts[0]}.{parts[1]}")
+    return variants
+
+
+def _modrinth_search(query, mc_version_filter, limit=20):
+    """Search Modrinth for shaders, optionally filtered by MC version."""
+    from urllib.request import urlopen, Request
+    from urllib.parse import quote
+    import json as _json
+
+    if mc_version_filter:
+        facets = (
+            f'[["project_type:shader"],'
+            f'["versions:{mc_version_filter}"]]'
+        )
+    else:
+        facets = '[["project_type:shader"]]'
+
+    url = (
+        f"https://api.modrinth.com/v2/search"
+        f"?facets={quote(facets, safe='')}"
+        f"&query={quote(query, safe='')}"
+        f"&limit={limit}"
+    )
+    req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
+    with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+        data = _json.loads(resp.read())
+    return data.get("hits", [])
+
+
 class ModrinthShaderSearcher(QThread):
     """Search Modrinth for shader packs in background."""
     finished = Signal(list)
@@ -124,34 +165,29 @@ class ModrinthShaderSearcher(QThread):
 
     def run(self):
         try:
-            from urllib.request import urlopen, Request
-            from urllib.parse import quote
-            import json as _json
-
-            facets = '[["project_type:shader"]]'
-            if self.mc_version:
-                facets = (
-                    f'[["project_type:shader"],'
-                    f'["versions:{self.mc_version}"]]'
-                )
-            url = (
-                f"https://api.modrinth.com/v2/search"
-                f"?facets={quote(facets, safe='')}"
-                f"&query={quote(self.query, safe='')}"
-                f"&limit=20"
-            )
-            req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
-            with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-                data = _json.loads(resp.read())
+            # Try exact version, then major.minor, then no filter
+            variants = _mc_version_variants(self.mc_version)
+            raw_hits = []
+            matched_version = ""
+            for v in variants:
+                raw_hits = _modrinth_search(self.query, v)
+                if raw_hits:
+                    matched_version = v
+                    break
+            if not raw_hits:
+                raw_hits = _modrinth_search(self.query, "")
 
             hits = []
-            for h in data.get("hits", []):
+            for h in raw_hits:
+                versions_list = h.get("display_categories", [])
                 hits.append({
                     "title": h.get("title", ""),
                     "slug": h.get("slug", ""),
                     "author": h.get("author", ""),
                     "downloads": h.get("downloads", 0),
                     "icon_url": h.get("icon_url", ""),
+                    "categories": versions_list,
+                    "matched_version": matched_version,
                 })
             self.finished.emit(hits)
         except Exception as exc:
@@ -169,27 +205,45 @@ class ShaderPackDownloader(QThread):
         self.mc_version = mc_version
         self.dest_dir = dest_dir
 
+    def _fetch_versions(self, mc_ver_filter):
+        from urllib.request import urlopen, Request
+        from urllib.parse import quote
+        import json as _json
+
+        url = (
+            f"https://api.modrinth.com/v2/project"
+            f"/{quote(self.slug, safe='')}/version"
+        )
+        if mc_ver_filter:
+            url += f"?game_versions=[%22{quote(mc_ver_filter, safe='')}%22]"
+        req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
+        with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+            return _json.loads(resp.read())
+
     def run(self):
         try:
-            from urllib.request import urlopen, Request
-            from urllib.parse import quote
-            import json as _json
-
-            url = (
-                f"https://api.modrinth.com/v2/project"
-                f"/{quote(self.slug, safe='')}/version"
-            )
-            if self.mc_version:
-                url += f"?game_versions=[%22{quote(self.mc_version, safe='')}%22]"
-            req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
-            with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-                versions = _json.loads(resp.read())
+            # Try exact version, then major.minor fallback
+            variants = _mc_version_variants(self.mc_version)
+            versions = []
+            used_version = ""
+            for v in variants:
+                versions = self._fetch_versions(v)
+                if versions:
+                    used_version = v
+                    break
+            if not versions:
+                # Last resort: get latest version regardless of MC version
+                versions = self._fetch_versions("")
+                used_version = "any"
 
             if not versions:
                 self.finished.emit(False, f"No versions found for {self.slug}")
                 return
 
-            file_info = versions[0]["files"][0]
+            # Pick the primary file from the first (latest) matching version
+            version_entry = versions[0]
+            game_versions = version_entry.get("game_versions", [])
+            file_info = version_entry["files"][0]
             filename = file_info["filename"]
             file_url = file_info["url"]
             dest = Path(self.dest_dir) / filename
@@ -201,6 +255,12 @@ class ShaderPackDownloader(QThread):
             dest.parent.mkdir(parents=True, exist_ok=True)
             from mc_common import download_url_file
             download_url_file(file_url, dest)
-            self.finished.emit(True, f"Downloaded {filename}")
+
+            ver_note = ""
+            if used_version and used_version != self.mc_version and used_version != "any":
+                ver_note = f" (matched {used_version}, supports: {', '.join(game_versions[:5])})"
+            elif used_version == "any":
+                ver_note = f" (no exact match, got latest: {', '.join(game_versions[:5])})"
+            self.finished.emit(True, f"Downloaded {filename}{ver_note}")
         except Exception as exc:
             self.finished.emit(False, str(exc))

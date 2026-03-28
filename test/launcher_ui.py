@@ -1273,6 +1273,7 @@ class LauncherWindow(QMainWindow):
             self.status_label.setText("No shader packs found.")
             return
 
+        matched_ver = ""
         for h in hits:
             downloads = h["downloads"]
             if downloads >= 1_000_000:
@@ -1281,6 +1282,10 @@ class LauncherWindow(QMainWindow):
                 dl_str = f"{downloads / 1_000:.0f}K"
             else:
                 dl_str = str(downloads)
+
+            categories = h.get("categories", [])
+            cat_str = ", ".join(c for c in categories if c not in ("shader",)) if categories else ""
+            matched_ver = h.get("matched_version", "")
 
             item = QListWidgetItem()
             item.setFlags(Qt.NoItemFlags)
@@ -1291,10 +1296,12 @@ class LauncherWindow(QMainWindow):
             row_layout.setContentsMargins(4, 2, 4, 2)
             row_layout.setSpacing(8)
 
-            label = QLabel(
-                f"<b>{h['title']}</b> by {h['author']}  "
-                f"<span style='color:#7f8792;'>({dl_str} downloads)</span>"
-            )
+            info_parts = [f"<b>{h['title']}</b> by {h['author']}"]
+            if cat_str:
+                info_parts.append(f"<span style='color:#58a6ff;'>[{cat_str}]</span>")
+            info_parts.append(f"<span style='color:#7f8792;'>({dl_str} downloads)</span>")
+
+            label = QLabel("  ".join(info_parts))
             label.setTextFormat(Qt.RichText)
             row_layout.addWidget(label, 1)
 
@@ -1308,7 +1315,10 @@ class LauncherWindow(QMainWindow):
             item.setSizeHint(row_widget.sizeHint())
             self.shader_results_list.setItemWidget(item, row_widget)
 
-        self.status_label.setText(f"Found {len(hits)} shader packs.")
+        status = f"Found {len(hits)} shader packs."
+        if matched_ver:
+            status += f" (filtered for MC {matched_ver})"
+        self.status_label.setText(status)
 
     def _download_shaderpack(self, slug):
         base_dir = self.base_dir_edit.text().strip()
