@@ -14,11 +14,6 @@ import zipfile
 from pathlib import Path
 from urllib.request import urlopen
 
-try:
-    import requests as _requests
-except ImportError:
-    _requests = None
-
 # ── Constants ─────────────────────────────────────────────────
 
 CHUNK_SIZE = 1024 * 128
@@ -590,4 +585,3 @@ def check_username_taken(username):
             "correct_name": None,
             "error": str(exc),
         }
-    return {"taken": False, "uuid": None, "correct_name": None, "error": None}

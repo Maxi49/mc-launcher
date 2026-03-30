@@ -18,7 +18,6 @@ from mc_common import (
     read_json,
     fetch_json_url,
     detect_arch,
-    rule_matches,
     allowed_by_rules,
     download_url_file,
     runtime_platform_key,

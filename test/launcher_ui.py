@@ -49,13 +49,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mc_common import check_username_taken, default_minecraft_dir, detect_mod_loader, sync_mods, _SSL_CTX
+from mc_common import default_minecraft_dir, detect_mod_loader, sync_mods, _SSL_CTX
 from core.version_utils import resolve_mc_version as _resolve_mc_version, detect_version_loader as _detect_version_loader, extract_mod_mc_version as _extract_mod_mc_version
 from core.platform import open_folder as _open_folder
-from core.constants import ModLoader, TAB_HOME, TAB_MODS, TAB_SHADERS, TAB_SERVER, TAB_SETTINGS
+from core.constants import TAB_HOME, TAB_MODS, TAB_SHADERS, TAB_SERVER, TAB_SETTINGS
 from ui.workers import ManifestFetcher, UsernameChecker, UpdateChecker, ModrinthShaderSearcher, ShaderPackDownloader
 from ui.style import PLAY_BUTTON_STYLE, MAIN_STYLESHEET
-from ui.settings_manager import SettingsManager
+
 from ui.process_manager import ProcessManager
 
 try:
@@ -949,15 +949,15 @@ class LauncherWindow(QMainWindow):
         if not instance or instance == "(default)":
             QMessageBox.warning(self, "Cannot delete", "Cannot delete the default server. Delete the folder manually.")
             return
-        # Check if running
         version_id = self.installed_combo.currentText()
-        if version_id:
-            import re as _re
-            mc_version = _resolve_mc_version(version_id)
-            instance_key = f"{mc_version}/{instance}"
-            if self.proc_mgr.is_server_running(instance_key):
-                QMessageBox.warning(self, "Server running", "Stop the server before deleting.")
-                return
+        if not version_id or version_id == "No versions installed":
+            QMessageBox.warning(self, "No version", "Select an installed version first.")
+            return
+        mc_version = _resolve_mc_version(version_id)
+        instance_key = f"{mc_version}/{instance}"
+        if self.proc_mgr.is_server_running(instance_key):
+            QMessageBox.warning(self, "Server running", "Stop the server before deleting.")
+            return
         reply = QMessageBox.warning(
             self, "Delete World",
             f"Delete world '{instance}' and all its data?\nThis cannot be undone.",
@@ -968,8 +968,6 @@ class LauncherWindow(QMainWindow):
             return
         base_dir = self.base_dir_edit.text().strip()
         servers_dir = self._resolve_servers_dir(base_dir)
-        import re as _re
-        mc_version = _resolve_mc_version(version_id)
         instance_dir = Path(servers_dir) / mc_version / instance
         if instance_dir.exists():
             shutil.rmtree(str(instance_dir), ignore_errors=True)
@@ -1304,7 +1302,7 @@ class LauncherWindow(QMainWindow):
             self.status_label.setText("No shader packs found.")
             return
 
-        matched_ver = ""
+        matched_ver = hits[0].get("matched_version", "") if hits else ""
         for h in hits:
             downloads = h["downloads"]
             if downloads >= 1_000_000:
@@ -1316,7 +1314,6 @@ class LauncherWindow(QMainWindow):
 
             categories = h.get("categories", [])
             cat_str = ", ".join(c for c in categories if c not in ("shader",)) if categories else ""
-            matched_ver = h.get("matched_version", "")
 
             item = QListWidgetItem()
             item.setFlags(Qt.NoItemFlags)
@@ -1956,7 +1953,7 @@ class LauncherWindow(QMainWindow):
         self.server_log_output.appendPlainText(line)
 
     def _on_pm_server_started(self, instance_key, cmd_line):
-        line = f"$ {cmd_line}"
+        line = f"[{instance_key}] $ {cmd_line}"
         self.log_output.appendPlainText(line)
         self.server_log_output.appendPlainText(line)
 
