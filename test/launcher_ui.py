@@ -719,6 +719,8 @@ class LauncherWindow(QMainWindow):
                 new_path = file_path.with_name(file_path.name.removesuffix(".disabled"))
             else:
                 new_path = file_path.with_name(file_path.name + ".disabled")
+            if new_path.exists():
+                new_path.unlink()
             file_path.rename(new_path)
             self.mods_list.blockSignals(True)
             item.setData(Qt.UserRole, str(new_path))
