@@ -112,6 +112,11 @@ class UpdateChecker(QThread):
         return parse(latest) > parse(current)
 
 
+CURSEFORGE_API = "https://api.curseforge.com"
+CURSEFORGE_GAME_ID = 432       # Minecraft
+CURSEFORGE_SHADER_CLASS = 6552  # Shaders
+
+
 def _mc_version_variants(mc_version):
     """Return version strings to try: exact, then major.minor, then no filter.
 
@@ -153,22 +158,52 @@ def _modrinth_search(query, mc_version_filter, limit=20):
     return data.get("hits", [])
 
 
+def _curseforge_search(query, mc_version_filter, api_key, limit=20):
+    """Search CurseForge for shaders, optionally filtered by MC version."""
+    from urllib.request import urlopen, Request
+    from urllib.parse import quote
+    import json as _json
+
+    url = (
+        f"{CURSEFORGE_API}/v1/mods/search"
+        f"?gameId={CURSEFORGE_GAME_ID}"
+        f"&classId={CURSEFORGE_SHADER_CLASS}"
+        f"&sortField=2&sortOrder=desc"
+        f"&pageSize={limit}"
+    )
+    if query:
+        url += f"&searchFilter={quote(query, safe='')}"
+    if mc_version_filter:
+        url += f"&gameVersion={quote(mc_version_filter, safe='')}"
+
+    req = Request(url, headers={
+        "User-Agent": "mc-launcher/1.0",
+        "x-api-key": api_key,
+    })
+    with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+        data = _json.loads(resp.read())
+    return data.get("data", [])
+
+
 class ModrinthShaderSearcher(QThread):
-    """Search Modrinth for shader packs in background."""
+    """Search Modrinth and CurseForge for shader packs in background."""
     finished = Signal(list)
     error = Signal(str)
 
-    def __init__(self, query="", mc_version="", parent=None):
+    def __init__(self, query="", mc_version="", curseforge_key="", parent=None):
         super().__init__(parent)
         self.query = query
         self.mc_version = mc_version
+        self.curseforge_key = curseforge_key
 
     def run(self):
+        hits = []
+        matched_version = ""
+
+        # ── Modrinth search ──
         try:
-            # Try exact version, then major.minor, then no filter
             variants = _mc_version_variants(self.mc_version)
             raw_hits = []
-            matched_version = ""
             for v in variants:
                 raw_hits = _modrinth_search(self.query, v)
                 if raw_hits:
@@ -177,7 +212,6 @@ class ModrinthShaderSearcher(QThread):
             if not raw_hits:
                 raw_hits = _modrinth_search(self.query, "")
 
-            hits = []
             for h in raw_hits:
                 versions_list = h.get("display_categories", [])
                 hits.append({
@@ -188,24 +222,68 @@ class ModrinthShaderSearcher(QThread):
                     "icon_url": h.get("icon_url", ""),
                     "categories": versions_list,
                     "matched_version": matched_version,
+                    "source": "Modrinth",
                 })
-            self.finished.emit(hits)
         except Exception as exc:
-            self.error.emit(str(exc))
-            self.finished.emit([])
+            self.error.emit(f"Modrinth: {exc}")
+
+        # ── CurseForge search ──
+        if self.curseforge_key:
+            try:
+                cf_hits = []
+                cf_matched = ""
+                variants = _mc_version_variants(self.mc_version)
+                for v in variants:
+                    cf_hits = _curseforge_search(self.query, v, self.curseforge_key)
+                    if cf_hits:
+                        cf_matched = v
+                        break
+                if not cf_hits:
+                    cf_hits = _curseforge_search(self.query, "", self.curseforge_key)
+
+                # Deduplicate by title (prefer Modrinth if both have it)
+                existing_titles = {h["title"].lower() for h in hits}
+                for m in cf_hits:
+                    title = m.get("name", "")
+                    if title.lower() in existing_titles:
+                        continue
+                    authors = m.get("authors", [])
+                    author = authors[0]["name"] if authors else ""
+                    categories = [c["name"] for c in m.get("categories", [])]
+                    hits.append({
+                        "title": title,
+                        "slug": str(m.get("id", "")),
+                        "author": author,
+                        "downloads": int(m.get("downloadCount", 0)),
+                        "icon_url": m.get("logo", {}).get("url", "") if m.get("logo") else "",
+                        "categories": categories,
+                        "matched_version": cf_matched,
+                        "source": "CurseForge",
+                        "cf_mod_id": m.get("id"),
+                    })
+            except Exception as exc:
+                self.error.emit(f"CurseForge: {exc}")
+
+        # Sort all results by downloads descending
+        hits.sort(key=lambda h: h["downloads"], reverse=True)
+        self.finished.emit(hits)
 
 
 class ShaderPackDownloader(QThread):
-    """Download a shader pack .zip from Modrinth in background."""
+    """Download a shader pack .zip from Modrinth or CurseForge in background."""
     finished = Signal(bool, str)  # success, message
 
-    def __init__(self, slug, mc_version, dest_dir, parent=None):
+    def __init__(self, slug, mc_version, dest_dir, source="Modrinth",
+                 curseforge_key="", cf_mod_id=None, parent=None):
         super().__init__(parent)
         self.slug = slug
         self.mc_version = mc_version
         self.dest_dir = dest_dir
+        self.source = source
+        self.curseforge_key = curseforge_key
+        self.cf_mod_id = cf_mod_id
 
-    def _fetch_versions(self, mc_ver_filter):
+    def _fetch_modrinth_versions(self, mc_ver_filter):
         from urllib.request import urlopen, Request
         from urllib.parse import quote
         import json as _json
@@ -220,47 +298,110 @@ class ShaderPackDownloader(QThread):
         with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
             return _json.loads(resp.read())
 
+    def _fetch_curseforge_files(self, mc_ver_filter):
+        from urllib.request import urlopen, Request
+        import json as _json
+
+        url = f"{CURSEFORGE_API}/v1/mods/{self.cf_mod_id}/files?pageSize=10"
+        if mc_ver_filter:
+            url += f"&gameVersion={mc_ver_filter}"
+        req = Request(url, headers={
+            "User-Agent": "mc-launcher/1.0",
+            "x-api-key": self.curseforge_key,
+        })
+        with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+            data = _json.loads(resp.read())
+        return data.get("data", [])
+
+    def _download_curseforge(self):
+        variants = _mc_version_variants(self.mc_version)
+        files = []
+        used_version = ""
+        for v in variants:
+            files = self._fetch_curseforge_files(v)
+            if files:
+                used_version = v
+                break
+        if not files:
+            files = self._fetch_curseforge_files("")
+            used_version = "any"
+
+        if not files:
+            self.finished.emit(False, f"No files found for CurseForge mod {self.cf_mod_id}")
+            return
+
+        cf_file = files[0]
+        filename = cf_file["fileName"]
+        download_url = cf_file.get("downloadUrl")
+        game_versions = cf_file.get("gameVersions", [])
+        dest = Path(self.dest_dir) / filename
+
+        if dest.exists():
+            self.finished.emit(True, f"{filename} already exists.")
+            return
+
+        if not download_url:
+            # Some mods don't allow direct download via API
+            self.finished.emit(False,
+                f"{filename}: author disabled API downloads. "
+                f"Download manually from CurseForge.")
+            return
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        from mc_common import download_url_file
+        download_url_file(download_url, dest)
+
+        ver_note = ""
+        if used_version and used_version != self.mc_version and used_version != "any":
+            ver_note = f" (matched {used_version})"
+        elif used_version == "any":
+            ver_note = f" (latest: {', '.join(game_versions[:5])})"
+        self.finished.emit(True, f"Downloaded {filename}{ver_note}")
+
+    def _download_modrinth(self):
+        variants = _mc_version_variants(self.mc_version)
+        versions = []
+        used_version = ""
+        for v in variants:
+            versions = self._fetch_modrinth_versions(v)
+            if versions:
+                used_version = v
+                break
+        if not versions:
+            versions = self._fetch_modrinth_versions("")
+            used_version = "any"
+
+        if not versions:
+            self.finished.emit(False, f"No versions found for {self.slug}")
+            return
+
+        version_entry = versions[0]
+        game_versions = version_entry.get("game_versions", [])
+        file_info = version_entry["files"][0]
+        filename = file_info["filename"]
+        file_url = file_info["url"]
+        dest = Path(self.dest_dir) / filename
+
+        if dest.exists():
+            self.finished.emit(True, f"{filename} already exists.")
+            return
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        from mc_common import download_url_file
+        download_url_file(file_url, dest)
+
+        ver_note = ""
+        if used_version and used_version != self.mc_version and used_version != "any":
+            ver_note = f" (matched {used_version}, supports: {', '.join(game_versions[:5])})"
+        elif used_version == "any":
+            ver_note = f" (no exact match, got latest: {', '.join(game_versions[:5])})"
+        self.finished.emit(True, f"Downloaded {filename}{ver_note}")
+
     def run(self):
         try:
-            # Try exact version, then major.minor fallback
-            variants = _mc_version_variants(self.mc_version)
-            versions = []
-            used_version = ""
-            for v in variants:
-                versions = self._fetch_versions(v)
-                if versions:
-                    used_version = v
-                    break
-            if not versions:
-                # Last resort: get latest version regardless of MC version
-                versions = self._fetch_versions("")
-                used_version = "any"
-
-            if not versions:
-                self.finished.emit(False, f"No versions found for {self.slug}")
-                return
-
-            # Pick the primary file from the first (latest) matching version
-            version_entry = versions[0]
-            game_versions = version_entry.get("game_versions", [])
-            file_info = version_entry["files"][0]
-            filename = file_info["filename"]
-            file_url = file_info["url"]
-            dest = Path(self.dest_dir) / filename
-
-            if dest.exists():
-                self.finished.emit(True, f"{filename} already exists.")
-                return
-
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            from mc_common import download_url_file
-            download_url_file(file_url, dest)
-
-            ver_note = ""
-            if used_version and used_version != self.mc_version and used_version != "any":
-                ver_note = f" (matched {used_version}, supports: {', '.join(game_versions[:5])})"
-            elif used_version == "any":
-                ver_note = f" (no exact match, got latest: {', '.join(game_versions[:5])})"
-            self.finished.emit(True, f"Downloaded {filename}{ver_note}")
+            if self.source == "CurseForge":
+                self._download_curseforge()
+            else:
+                self._download_modrinth()
         except Exception as exc:
             self.finished.emit(False, str(exc))

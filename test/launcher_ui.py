@@ -611,6 +611,16 @@ class LauncherWindow(QMainWindow):
         dl_form.addRow(self.show_snapshots_check)
         layout.addWidget(download_group)
 
+        # API Keys
+        api_group = QGroupBox("API Keys")
+        api_form = QFormLayout(api_group)
+        api_form.setLabelAlignment(Qt.AlignLeft)
+        self.curseforge_key_edit = QLineEdit()
+        self.curseforge_key_edit.setPlaceholderText("CurseForge API key (optional)")
+        self.curseforge_key_edit.setEchoMode(QLineEdit.Password)
+        api_form.addRow("CurseForge", self.curseforge_key_edit)
+        layout.addWidget(api_group)
+
         layout.addStretch()
         scroll.setWidget(content)
 
@@ -1258,9 +1268,10 @@ class LauncherWindow(QMainWindow):
         if version_name and version_name != "No versions installed":
             mc_version = _resolve_mc_version(version_name)
 
+        cf_key = self.curseforge_key_edit.text().strip()
         self.shader_search_btn.setEnabled(False)
         self.status_label.setText("Searching shader packs...")
-        self._shader_searcher = ModrinthShaderSearcher(query, mc_version, self)
+        self._shader_searcher = ModrinthShaderSearcher(query, mc_version, cf_key, self)
         self._shader_searcher.finished.connect(self._on_shader_search_done)
         self._shader_searcher.start()
 
@@ -1298,7 +1309,10 @@ class LauncherWindow(QMainWindow):
             row_layout.setContentsMargins(4, 2, 4, 2)
             row_layout.setSpacing(8)
 
-            info_parts = [f"<b>{h['title']}</b> by {h['author']}"]
+            source = h.get("source", "Modrinth")
+            source_color = "#1bd96a" if source == "Modrinth" else "#f16436"
+            info_parts = [f"<span style='color:{source_color};font-weight:600;'>[{source}]</span>"]
+            info_parts.append(f"<b>{h['title']}</b> by {h['author']}")
             if cat_str:
                 info_parts.append(f"<span style='color:#58a6ff;'>[{cat_str}]</span>")
             info_parts.append(f"<span style='color:#7f8792;'>({dl_str} downloads)</span>")
@@ -1309,8 +1323,10 @@ class LauncherWindow(QMainWindow):
 
             btn = QPushButton("Download")
             slug = h["slug"]
+            src = h.get("source", "Modrinth")
+            cf_id = h.get("cf_mod_id")
             btn.clicked.connect(
-                lambda checked, s=slug: self._download_shaderpack(s)
+                lambda checked, s=slug, so=src, ci=cf_id: self._download_shaderpack(s, so, ci)
             )
             row_layout.addWidget(btn)
 
@@ -1322,7 +1338,7 @@ class LauncherWindow(QMainWindow):
             status += f" (filtered for MC {matched_ver})"
         self.status_label.setText(status)
 
-    def _download_shaderpack(self, slug):
+    def _download_shaderpack(self, slug, source="Modrinth", cf_mod_id=None):
         base_dir = self.base_dir_edit.text().strip()
         if not base_dir:
             return
@@ -1338,9 +1354,10 @@ class LauncherWindow(QMainWindow):
         if version_name and version_name != "No versions installed":
             mc_version = _resolve_mc_version(version_name)
 
-        self.status_label.setText(f"Downloading shader pack: {slug}...")
+        cf_key = self.curseforge_key_edit.text().strip()
+        self.status_label.setText(f"Downloading shader pack: {slug} ({source})...")
         self._shader_downloader = ShaderPackDownloader(
-            slug, mc_version, str(sp_dir), self
+            slug, mc_version, str(sp_dir), source, cf_key, cf_mod_id, self
         )
         self._shader_downloader.finished.connect(self._on_shaderpack_downloaded)
         self._shader_downloader.start()
@@ -1478,6 +1495,7 @@ class LauncherWindow(QMainWindow):
             self.servers_dir_edit.setText(
                 str(Path(self.base_dir_edit.text().strip() or default_base_dir()) / "servers")
             )
+        self.curseforge_key_edit.setText(settings.get("curseforge_api_key", ""))
         self._pending_selected_version = settings.get("selected_version", "")
         self._pending_server_instance = settings.get("selected_server_instance", "")
 
@@ -1516,6 +1534,7 @@ class LauncherWindow(QMainWindow):
             "srv_cmd_blocks": self.srv_cmd_blocks_check.isChecked(),
             "srv_cheats": self.srv_cheats_check.isChecked(),
             "srv_port": self.srv_port_spin.value(),
+            "curseforge_api_key": self.curseforge_key_edit.text().strip(),
             "selected_version": self.installed_combo.currentText(),
             "selected_server_instance": self.server_instance_combo.currentText(),
         }
