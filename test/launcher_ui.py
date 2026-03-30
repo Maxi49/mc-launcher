@@ -67,6 +67,24 @@ GITHUB_REPO = "Maxi49/mc-launcher"
 SETTINGS_FILE = Path(__file__).with_name("launcher_settings.json")
 MANIFEST_CACHE = Path(__file__).with_name("version_manifest_cache.json")
 MANIFEST_URL = "https://launchermeta.mojang.com/mc/game/version_manifest.json"
+ENV_FILE = Path(__file__).with_name(".env")
+
+
+def _load_env():
+    """Load key=value pairs from .env file if it exists."""
+    env = {}
+    if ENV_FILE.exists():
+        try:
+            for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    env[key.strip()] = val.strip()
+        except OSError:
+            pass
+    return env
 
 
 def default_base_dir():
@@ -1495,7 +1513,9 @@ class LauncherWindow(QMainWindow):
             self.servers_dir_edit.setText(
                 str(Path(self.base_dir_edit.text().strip() or default_base_dir()) / "servers")
             )
-        self.curseforge_key_edit.setText(settings.get("curseforge_api_key", ""))
+        env = _load_env()
+        cf_key = env.get("CURSEFORGE_API_KEY", "") or settings.get("curseforge_api_key", "")
+        self.curseforge_key_edit.setText(cf_key)
         self._pending_selected_version = settings.get("selected_version", "")
         self._pending_server_instance = settings.get("selected_server_instance", "")
 
@@ -1534,11 +1554,38 @@ class LauncherWindow(QMainWindow):
             "srv_cmd_blocks": self.srv_cmd_blocks_check.isChecked(),
             "srv_cheats": self.srv_cheats_check.isChecked(),
             "srv_port": self.srv_port_spin.value(),
-            "curseforge_api_key": self.curseforge_key_edit.text().strip(),
             "selected_version": self.installed_combo.currentText(),
             "selected_server_instance": self.server_instance_combo.currentText(),
         }
         save_settings(settings)
+        # Save API key to .env (never in settings json)
+        cf_key = self.curseforge_key_edit.text().strip()
+        self._save_env_key("CURSEFORGE_API_KEY", cf_key)
+
+    @staticmethod
+    def _save_env_key(key, value):
+        """Update or add a key in the .env file."""
+        lines = []
+        found = False
+        if ENV_FILE.exists():
+            try:
+                lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                pass
+        new_lines = []
+        for line in lines:
+            if line.strip().startswith(f"{key}="):
+                if value:
+                    new_lines.append(f"{key}={value}")
+                found = True
+            else:
+                new_lines.append(line)
+        if not found and value:
+            new_lines.append(f"{key}={value}")
+        try:
+            ENV_FILE.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        except OSError:
+            pass
 
     def closeEvent(self, event):
         self._save_settings()

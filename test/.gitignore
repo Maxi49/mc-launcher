@@ -6,6 +6,7 @@ __pycache__/
 .minecraft/
 launcher_settings.json
 version_manifest_cache.json
+.env
 
 # Build output
 dist/
