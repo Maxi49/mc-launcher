@@ -52,14 +52,20 @@ from core.version_utils import maven_to_path
 
 def native_classifier_matches(classifier, os_name, os_arch):
     if os_name == "windows":
-        if classifier == "natives-windows":       return os_arch == "x64"
-        if classifier == "natives-windows-x86":   return os_arch == "x86"
-        if classifier == "natives-windows-arm64":  return os_arch == "arm64"
+        if classifier == "natives-windows":       
+            return os_arch == "x64"
+        if classifier == "natives-windows-x86":  
+            return os_arch == "x86"
+        if classifier == "natives-windows-arm64":  
+            return os_arch == "arm64"
     elif os_name == "osx":
-        if classifier in ("natives-osx", "natives-macos"): return True
-        if classifier == "natives-macos-arm64":   return os_arch == "arm64"
+        if classifier in ("natives-osx", "natives-macos"):
+            return True
+        if classifier == "natives-macos-arm64":   
+            return os_arch == "arm64"
     elif os_name == "linux":
-        if classifier == "natives-linux":         return True
+        if classifier == "natives-linux":         
+            return True
     return False
 
 

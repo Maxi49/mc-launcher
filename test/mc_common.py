@@ -246,8 +246,10 @@ def runtime_platform_key(os_arch):
     if sys.platform == "darwin":
         return "mac-os-arm64" if os_arch == "arm64" else "mac-os"
     if sys.platform == "win32":
-        if os_arch == "x86":   return "windows-x86"
-        if os_arch == "arm64": return "windows-arm64"
+        if os_arch == "x86":   
+            return "windows-x86"
+        if os_arch == "arm64": 
+            return "windows-arm64"
         return "windows-x64"
     return "linux-i386" if os_arch == "x86" else "linux"
 
@@ -564,21 +566,21 @@ def check_username_taken(username):
       - "correct_name": the exact casing of the name if taken
       - "error": error message string if the check failed
     """
+    _not_taken = {"taken": False, "uuid": None, "correct_name": None, "error": None}
     url = MOJANG_PROFILE_URL + username
     try:
         with urlopen(url, timeout=10, context=_SSL_CTX) as resp:
-            if resp.status == 200:
-                data = json.loads(resp.read())
-                return {
-                    "taken": True,
-                    "uuid": data.get("id"),
-                    "correct_name": data.get("name"),
-                    "error": None,
-                }
+            data = json.loads(resp.read())
+            return {
+                "taken": True,
+                "uuid": data.get("id"),
+                "correct_name": data.get("name"),
+                "error": None,
+            }
     except Exception as exc:
         code = getattr(exc, "code", None)
         if code in (204, 404):
-            return {"taken": False, "uuid": None, "correct_name": None, "error": None}
+            return _not_taken
         return {
             "taken": None,
             "uuid": None,

@@ -1129,13 +1129,20 @@ class LauncherWindow(QMainWindow):
                 bat = current.with_name("update.bat")
                 bat.write_text(
                     "@echo off\n"
-                    "timeout /t 2 /nobreak >nul\n"
-                    f"move /y \"{new_exe}\" \"{current}\"\n"
+                    "echo Waiting for launcher to exit...\n"
+                    ":wait\n"
+                    "timeout /t 1 /nobreak >nul\n"
+                    f"move /y \"{new_exe}\" \"{current}\" >nul 2>&1\n"
+                    "if errorlevel 1 goto wait\n"
                     f"start \"\" \"{current}\"\n"
                     "del \"%~f0\"\n",
                     encoding="ascii",
                 )
-                subprocess.Popen(["cmd", "/c", str(bat)], close_fds=True)
+                subprocess.Popen(
+                    ["cmd", "/c", str(bat)],
+                    creationflags=subprocess.DETACHED_PROCESS
+                    | subprocess.CREATE_NO_WINDOW,
+                )
                 QApplication.instance().quit()
             else:
                 import stat as _stat
