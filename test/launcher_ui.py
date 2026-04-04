@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGraphicsOpacityEffect,
@@ -121,6 +123,7 @@ class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Minecraft Launcher")
+        self.setMinimumSize(480, 400)
         self.resize(680, 750)
 
         self.script_dir = Path(__file__).resolve().parent
@@ -639,6 +642,11 @@ class LauncherWindow(QMainWindow):
         api_form.addRow("CurseForge", self.curseforge_key_edit)
         layout.addWidget(api_group)
 
+        uninstall_btn = QPushButton("Uninstall Launcher")
+        uninstall_btn.setStyleSheet("QPushButton { color: #ff4444; }")
+        uninstall_btn.clicked.connect(self._on_uninstall_launcher)
+        layout.addWidget(uninstall_btn)
+
         layout.addStretch()
         scroll.setWidget(content)
 
@@ -977,6 +985,72 @@ class LauncherWindow(QMainWindow):
             shutil.rmtree(str(instance_dir), ignore_errors=True)
         self._refresh_server_instances()
         self.status_label.setText(f"Deleted world '{instance}'.")
+
+    def _on_uninstall_launcher(self):
+        import shutil
+        import tempfile
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Uninstall Launcher")
+        dlg_layout = QVBoxLayout(dlg)
+
+        dlg_layout.addWidget(QLabel(
+            "This will permanently delete the launcher settings, cache, and executable."
+        ))
+
+        delete_data_cb = QCheckBox(
+            "Also delete downloaded game data (versions, assets, libraries, mods, servers)"
+        )
+        dlg_layout.addWidget(delete_data_cb)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_box.button(QDialogButtonBox.Cancel).setDefault(True)
+        btn_box.button(QDialogButtonBox.Cancel).setFocus()
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.rejected.connect(dlg.reject)
+        dlg_layout.addWidget(btn_box)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        # Delete launcher config files
+        for f in (SETTINGS_FILE, MANIFEST_CACHE, ENV_FILE):
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        # Optionally delete game data
+        if delete_data_cb.isChecked():
+            base_dir = Path(self.base_dir_edit.text().strip())
+            for folder in ("versions", "assets", "libraries", "mods", "servers"):
+                target = base_dir / folder
+                if target.exists():
+                    shutil.rmtree(str(target), ignore_errors=True)
+
+        # Self-delete the executable (only when running as frozen PyInstaller binary)
+        if getattr(sys, "frozen", False):
+            exe = Path(sys.executable)
+            if sys.platform == "win32":
+                bat = Path(tempfile.gettempdir()) / "_uninstall_launcher.bat"
+                bat.write_text(
+                    f'@echo off\n'
+                    f'ping -n 2 127.0.0.1 >nul\n'
+                    f'del /f /q "{exe}"\n'
+                    f'del /f /q "%~f0"\n',
+                    encoding="utf-8",
+                )
+                subprocess.Popen(
+                    ["cmd.exe", "/c", str(bat)],
+                    creationflags=0x08000000,  # CREATE_NO_WINDOW
+                )
+            else:
+                try:
+                    os.unlink(exe)
+                except OSError:
+                    pass
+
+        QApplication.quit()
 
     def _on_port_changed(self, value):
         self.firewall_btn.setText(f"Open firewall port {value}")
