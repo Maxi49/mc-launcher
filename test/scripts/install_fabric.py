@@ -170,8 +170,10 @@ def install_server(mc_version, servers_dir, loader_version, installer_version, i
         client_mods = Path(client_base_dir) / "mods"
         server_mods = server_dir / "mods"
         print("Syncing client mods to server...")
-        copied, skipped = sync_mods(client_mods, server_mods, server_loader="fabric")
+        copied, skipped, removed = sync_mods(client_mods, server_mods, server_loader="fabric")
         print(f"  {copied} mod(s) synced to server.")
+        if removed:
+            print(f"  {removed} mod(s) removed from server.")
         if skipped:
             print(f"  {skipped} client-only mod(s) skipped.")
 

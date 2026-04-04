@@ -14,16 +14,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mc_common import (
     CHUNK_SIZE,
-    RUNTIME_DOWNLOAD_TIMEOUT,
     read_json,
-    fetch_json_url,
     detect_arch,
     allowed_by_rules,
-    download_url_file,
-    runtime_platform_key,
-    runtime_os_folder,
-    find_runtime_index_url,
-    select_runtime_manifest,
     ensure_java_runtime,
     find_java,
     current_os_name,
@@ -354,7 +347,7 @@ def main():
             print(f"  {path}", file=sys.stderr)
         if len(missing) > 20:
             print(f"  ... and {len(missing) - 20} more", file=sys.stderr)
-        print("run download_version_windows.py to fetch missing files", file=sys.stderr)
+        print("run download_version.py to fetch missing files", file=sys.stderr)
         return 1
 
     jvm_source = args_data.get("jvm", [])

@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
 from mc_common import default_minecraft_dir, detect_mod_loader, sync_mods, _SSL_CTX
 from core.version_utils import resolve_mc_version as _resolve_mc_version, detect_version_loader as _detect_version_loader, extract_mod_mc_version as _extract_mod_mc_version
 from core.platform import open_folder as _open_folder
-from core.constants import TAB_HOME, TAB_MODS, TAB_SHADERS, TAB_SERVER, TAB_SETTINGS
+from core.constants import TAB_HOME
 from ui.workers import ManifestFetcher, UsernameChecker, UpdateChecker, ModrinthShaderSearcher, ShaderPackDownloader
 from ui.style import PLAY_BUTTON_STYLE, MAIN_STYLESHEET
 
@@ -774,15 +774,19 @@ class LauncherWindow(QMainWindow):
         # Detect server loader type
         loader = _detect_version_loader(version_id)
         server_loader = loader if loader != "vanilla" else None
-        copied, skipped = sync_mods(client_mods, server_mods, server_loader=server_loader)
+        copied, skipped, removed = sync_mods(client_mods, server_mods, server_loader=server_loader)
         parts = []
         if copied:
             parts.append(f"{copied} synced")
+        if removed:
+            parts.append(f"{removed} removed")
         if skipped:
             parts.append(f"{skipped} skipped")
         if parts:
             self.status_label.setText(f"Server mods updated: {', '.join(parts)}.")
-            # Warn if server is running
+        else:
+            self.status_label.setText("Server mods already in sync.")
+        if copied or removed:
             instance_key = self._get_instance_key(version_id)
             if self.proc_mgr.is_server_running(instance_key):
                 self.server_log_output.appendPlainText(

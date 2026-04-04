@@ -524,6 +524,7 @@ def sync_mods(client_mods_dir, server_mods_dir, server_loader=None):
     active_client_mods = set()
     copied = 0
     skipped = 0
+    removed = 0
     for jar in sorted(client_mods_dir.glob("*.jar")):
         client_only, reason = is_client_only_mod(jar)
         if client_only:
@@ -550,8 +551,9 @@ def sync_mods(client_mods_dir, server_mods_dir, server_loader=None):
         if server_jar.name not in active_client_mods:
             server_jar.unlink()
             print(f"  removed from server: {server_jar.name}")
+            removed += 1
 
-    return copied, skipped
+    return copied, skipped, removed
 
 
 # ── Username validation ──────────────────────────────────────

@@ -20,6 +20,7 @@ from mc_common import (
     find_version,
     current_os_name,
 )
+from core.version_utils import maven_to_path
 
 ASSET_BASE_URL = "https://resources.download.minecraft.net"
 
@@ -150,6 +151,17 @@ def main():
                 downloaded += 1
             else:
                 skipped += 1
+        elif lib.get("name"):
+            rel_path = maven_to_path(lib["name"])
+            if rel_path:
+                base_url = lib.get("url", "https://libraries.minecraft.net/").rstrip("/")
+                url = f"{base_url}/{rel_path}"
+                dest = libs_dir / rel_path
+                ok = download_file(session, url, dest)
+                if ok:
+                    downloaded += 1
+                else:
+                    skipped += 1
 
         natives = lib.get("natives", {})
         classifiers = downloads_info.get("classifiers", {})

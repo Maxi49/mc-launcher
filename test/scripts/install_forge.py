@@ -113,7 +113,7 @@ def install_client(mc_version, base_dir, forge_version):
         return 1
 
     # 4. Launch installer GUI
-    print(f"Launching Forge installer GUI...")
+    print("Launching Forge installer GUI...")
     print("Click 'Install Client' in the Forge installer window.")
     print("Make sure the install path points to your .minecraft folder:")
     print(f"  {base_dir}")
@@ -217,7 +217,7 @@ def install_server(mc_version, servers_dir, forge_version, instance=None):
     from core.platform import forge_run_script_name
     run_script = server_dir / forge_run_script_name()
     if run_script.exists():
-        print(f"Forge server installed successfully.")
+        print("Forge server installed successfully.")
         print(f"Run script: {run_script}")
     else:
         print("Warning: run script not found. The server may use an older Forge format.")

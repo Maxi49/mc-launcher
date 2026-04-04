@@ -3,7 +3,12 @@ import sys
 import PyInstaller.__main__
 
 sep = ";" if sys.platform == "win32" else ":"
-name = "launcher-windows" if sys.platform == "win32" else "launcher-macos"
+if sys.platform == "win32":
+    name = "launcher-windows"
+elif sys.platform == "darwin":
+    name = "launcher-macos"
+else:
+    name = "launcher-linux"
 
 PyInstaller.__main__.run([
     "launcher_ui.py",

@@ -169,9 +169,11 @@ def main():
         server_mods = server_dir / "mods"
         if client_mods.is_dir():
             print("Syncing client mods to server...")
-            copied, skipped = sync_mods(client_mods, server_mods, server_loader="forge")
+            copied, skipped, removed = sync_mods(client_mods, server_mods, server_loader="forge")
             if copied:
                 print(f"  {copied} mod(s) synced.")
+            if removed:
+                print(f"  {removed} mod(s) removed from server.")
             if skipped:
                 print(f"  {skipped} client-only mod(s) skipped.")
     elif detected_type == ServerType.FABRIC:
@@ -181,9 +183,11 @@ def main():
         server_mods = server_dir / "mods"
         if client_mods.is_dir():
             print("Syncing client mods to server...")
-            copied, skipped = sync_mods(client_mods, server_mods, server_loader="fabric")
+            copied, skipped, removed = sync_mods(client_mods, server_mods, server_loader="fabric")
             if copied:
                 print(f"  {copied} mod(s) synced.")
+            if removed:
+                print(f"  {removed} mod(s) removed from server.")
             if skipped:
                 print(f"  {skipped} client-only mod(s) skipped.")
     elif not server_jar.exists():

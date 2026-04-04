@@ -84,17 +84,18 @@ class UpdateChecker(QThread):
     def run(self):
         try:
             from urllib.request import urlopen
-            import json as _json
             url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
             with urlopen(url, timeout=10, context=_SSL_CTX) as resp:
-                data = _json.loads(resp.read())
+                data = json.loads(resp.read())
             tag = data.get("tag_name", "")
             latest = tag.lstrip("v")
             if self._newer(latest, __version__):
-                asset_name = (
-                    "launcher-windows.exe" if sys.platform == "win32"
-                    else "launcher-macos"
-                )
+                if sys.platform == "win32":
+                    asset_name = "launcher-windows.exe"
+                elif sys.platform == "darwin":
+                    asset_name = "launcher-macos"
+                else:
+                    asset_name = "launcher-linux"
                 for asset in data.get("assets", []):
                     if asset["name"] == asset_name:
                         self.update_available.emit(tag, asset["browser_download_url"])
@@ -136,7 +137,6 @@ def _modrinth_search(query, mc_version_filter, limit=20):
     """Search Modrinth for shaders, optionally filtered by MC version."""
     from urllib.request import urlopen, Request
     from urllib.parse import quote
-    import json as _json
 
     if mc_version_filter:
         facets = (
@@ -154,7 +154,7 @@ def _modrinth_search(query, mc_version_filter, limit=20):
     )
     req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
     with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-        data = _json.loads(resp.read())
+        data = json.loads(resp.read())
     return data.get("hits", [])
 
 
@@ -162,7 +162,6 @@ def _curseforge_search(query, mc_version_filter, api_key, limit=20):
     """Search CurseForge for shaders, optionally filtered by MC version."""
     from urllib.request import urlopen, Request
     from urllib.parse import quote
-    import json as _json
 
     url = (
         f"{CURSEFORGE_API}/v1/mods/search"
@@ -181,7 +180,7 @@ def _curseforge_search(query, mc_version_filter, api_key, limit=20):
         "x-api-key": api_key,
     })
     with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-        data = _json.loads(resp.read())
+        data = json.loads(resp.read())
     return data.get("data", [])
 
 
@@ -286,7 +285,6 @@ class ShaderPackDownloader(QThread):
     def _fetch_modrinth_versions(self, mc_ver_filter):
         from urllib.request import urlopen, Request
         from urllib.parse import quote
-        import json as _json
 
         url = (
             f"https://api.modrinth.com/v2/project"
@@ -296,11 +294,10 @@ class ShaderPackDownloader(QThread):
             url += f"?game_versions=[%22{quote(mc_ver_filter, safe='')}%22]"
         req = Request(url, headers={"User-Agent": "mc-launcher/1.0"})
         with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-            return _json.loads(resp.read())
+            return json.loads(resp.read())
 
     def _fetch_curseforge_files(self, mc_ver_filter):
         from urllib.request import urlopen, Request
-        import json as _json
 
         url = f"{CURSEFORGE_API}/v1/mods/{self.cf_mod_id}/files?pageSize=10"
         if mc_ver_filter:
@@ -310,7 +307,7 @@ class ShaderPackDownloader(QThread):
             "x-api-key": self.curseforge_key,
         })
         with urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-            data = _json.loads(resp.read())
+            data = json.loads(resp.read())
         return data.get("data", [])
 
     def _download_curseforge(self):

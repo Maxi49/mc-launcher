@@ -41,8 +41,24 @@ jobs:
           name: launcher-macos
           path: dist/launcher-macos
 
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install pyinstaller PySide6 requests
+      - name: Build
+        run: python build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-linux
+          path: dist/launcher-linux
+
   release:
-    needs: [build-windows, build-macos]
+    needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -54,4 +70,5 @@ jobs:
           files: |
             artifacts/launcher-windows/launcher-windows.exe
             artifacts/launcher-macos/launcher-macos
+            artifacts/launcher-linux/launcher-linux
           generate_release_notes: true
