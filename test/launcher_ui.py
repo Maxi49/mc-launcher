@@ -625,11 +625,14 @@ class LauncherWindow(QMainWindow):
         self.verify_check = QCheckBox("Verify SHA1 (slow)")
         self.show_snapshots_check = QCheckBox("Show snapshots in download list")
         self.show_snapshots_check.toggled.connect(self._populate_version_combo)
+        self.show_betas_check = QCheckBox("Show old betas/alphas in download list")
+        self.show_betas_check.toggled.connect(self._populate_version_combo)
         dl_form.addRow(self.no_assets_check)
         dl_form.addRow(self.include_server_check)
         dl_form.addRow(self.include_mappings_check)
         dl_form.addRow(self.verify_check)
         dl_form.addRow(self.show_snapshots_check)
+        dl_form.addRow(self.show_betas_check)
         layout.addWidget(download_group)
 
         # API Keys
@@ -1535,10 +1538,17 @@ class LauncherWindow(QMainWindow):
             if hasattr(self, "show_snapshots_check")
             else False
         )
+        show_betas = (
+            self.show_betas_check.isChecked()
+            if hasattr(self, "show_betas_check")
+            else False
+        )
         self.version_combo.clear()
         for v in self.all_manifest_versions:
             vtype = v.get("type", "")
-            if vtype == "release" or (show_snapshots and vtype == "snapshot"):
+            if (vtype == "release"
+                    or (show_snapshots and vtype == "snapshot")
+                    or (show_betas and vtype in ("old_beta", "old_alpha"))):
                 self.version_combo.addItem(v.get("id", ""))
         self.version_combo.setEnabled(self.version_combo.count() > 0)
         if self.version_combo.count() > 0:
@@ -1573,6 +1583,7 @@ class LauncherWindow(QMainWindow):
         self.include_mappings_check.setChecked(settings.get("include_mappings", False))
         self.verify_check.setChecked(settings.get("verify", False))
         self.show_snapshots_check.setChecked(settings.get("show_snapshots", False))
+        self.show_betas_check.setChecked(settings.get("show_betas", False))
         self.server_accept_eula_check.setChecked(settings.get("server_accept_eula", True))
         self.server_gui_check.setChecked(settings.get("server_gui", False))
         self.server_restart_check.setChecked(settings.get("server_restart", True))
@@ -1622,6 +1633,7 @@ class LauncherWindow(QMainWindow):
             "include_mappings": self.include_mappings_check.isChecked(),
             "verify": self.verify_check.isChecked(),
             "show_snapshots": self.show_snapshots_check.isChecked(),
+            "show_betas": self.show_betas_check.isChecked(),
             "server_accept_eula": self.server_accept_eula_check.isChecked(),
             "server_gui": self.server_gui_check.isChecked(),
             "server_restart": self.server_restart_check.isChecked(),
