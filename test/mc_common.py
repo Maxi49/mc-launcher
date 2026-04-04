@@ -164,6 +164,11 @@ def download_file(session, url, dest, expected_size=None, expected_sha1=None, ve
                     raise IOError(f"sha1 mismatch for {dest} (expected {expected_sha1}, got {actual})")
             return True
         except (OSError, IOError) as exc:
+            if hasattr(exc, 'response') and getattr(exc.response, 'status_code', 0) == 404:
+                if dest.exists():
+                    dest.unlink()
+                print(f"skipped (404 not found): {url}")
+                return False
             last_exc = exc
             if dest.exists():
                 dest.unlink()
