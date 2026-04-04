@@ -267,6 +267,20 @@ def main():
     }
     args_data = version_data.get("arguments", {})
 
+    # Legacy versions (pre-1.13) use minecraftArguments instead of arguments
+    legacy_minecraft_args = version_data.get("minecraftArguments")
+    if not args_data and legacy_minecraft_args:
+        args_data = {
+            "game": legacy_minecraft_args.split(),
+            "jvm": [
+                "-Djava.library.path=${natives_directory}",
+                "-Dminecraft.launcher.brand=${launcher_name}",
+                "-Dminecraft.launcher.version=${launcher_version}",
+                "-cp",
+                "${classpath}",
+            ],
+        }
+
     libs_dir = base_dir / "libraries"
     classpath_entries = []
     native_jars = []
