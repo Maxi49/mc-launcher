@@ -289,8 +289,9 @@ def main():
                 missing.append(lib_path)
             else:
                 classpath_entries.append(lib_path)
-        elif not artifact and lib.get("name"):
+        elif not artifact and lib.get("name") and not lib.get("natives"):
             # Fallback for libraries without downloads (e.g. Fabric/Iris profiles)
+            # Skip natives-only libraries — they have no main jar.
             rel_path = maven_to_path(lib["name"])
             if rel_path:
                 lib_path = libs_dir / rel_path

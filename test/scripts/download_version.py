@@ -151,7 +151,7 @@ def main():
                 downloaded += 1
             else:
                 skipped += 1
-        elif lib.get("name"):
+        elif lib.get("name") and not lib.get("natives"):
             rel_path = maven_to_path(lib["name"])
             if rel_path:
                 base_url = lib.get("url", "https://libraries.minecraft.net/").rstrip("/")
